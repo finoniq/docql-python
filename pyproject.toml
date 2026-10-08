@@ -34,9 +34,9 @@ build-backend = "uv_build"
 [tool.mypy]
 strict = true
 python_version = "3.11"
-# scripts/ holds only shell files until run-readme.py lands; mypy exits 2 on a
-# .py-free directory, so it joins the file list when that script exists.
-files = ["src", "tests"]
+# scripts/ holds run_readme.py plus shell files; mypy only collects .py files,
+# so the directory joins the list now that the script exists.
+files = ["src", "tests", "scripts"]
 
 [tool.pytest.ini_options]
 addopts = "--strict-markers --import-mode=importlib"
