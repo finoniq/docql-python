@@ -143,6 +143,11 @@ class Upload:
             len(self._preamble) + file_size + len(self._epilogue) if file_size is not None else None
         )
 
+    @property
+    def file_size(self) -> int | None:
+        """The measured file length, when known (framing excluded)."""
+        return self._file_size
+
     def iter_bytes(self) -> Iterator[bytes]:
         """Yield the preamble, the file bytes in bounded chunks, the epilogue."""
         yield self._preamble

@@ -13,12 +13,36 @@ from docql._constants import (
     DEFAULT_TIMEOUT,
     ENV_API_KEY,
     ENV_API_URL,
+    ERROR_BODY_READ_LIMIT,
+    MAX_UPLOAD_BYTES,
     QUERY_PATH,
 )
 from docql._errors import DocQLConnectionError, DocQLTimeoutError
-from docql._request import _ShortReadError, prepare_upload
+from docql._request import Upload, _ShortReadError, prepare_upload
 from docql._response import QueryResult, decode_error, parse_result
 from docql._version import __version__
+
+# h11/httpcore failures (a raw h11.LocalProtocolError is not an httpx type)
+# are re-mapped by module origin so the undeclared h11 dependency is never
+# imported (research Pitfall 1).
+_INTERNAL_MODULE_ROOTS = ("h11", "httpcore")
+
+
+def _read_error_body(response: httpx.Response) -> bytes:
+    """Read at most ``ERROR_BODY_READ_LIMIT`` bytes of a non-2xx body (T-11-12).
+
+    Slicing each chunk keeps the bound even when a transport yields chunks
+    larger than the limit; the caller closes the response right after.
+    """
+    parts: list[bytes] = []
+    remaining = ERROR_BODY_READ_LIMIT
+    for chunk in response.iter_bytes():
+        if len(chunk) >= remaining:
+            parts.append(chunk[:remaining])
+            break
+        parts.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(parts)
 
 
 class DocQL:
@@ -57,6 +81,13 @@ class DocQL:
                 "DocQL api_url must be an http:// or https:// URL: pass "
                 f"api_url= or set {ENV_API_URL} (got {url!r})"
             )
+        try:
+            httpx.URL(url)
+        except httpx.InvalidURL as exc:
+            raise ValueError(
+                "DocQL api_url is not a URL httpx can parse: pass api_url= "
+                f"or set {ENV_API_URL} (got {url!r})"
+            ) from exc
         self._api_url = url.rstrip("/")
 
         if isinstance(timeout, httpx.Timeout):
@@ -76,6 +107,19 @@ class DocQL:
         else:
             self._client = httpx.Client(timeout=DEFAULT_TIMEOUT)
             self._owns_client = True
+
+    def _scrub(self, text: str) -> str:
+        """Keep the API key out of every message this client builds."""
+        return text.replace(self._api_key, "***")
+
+    def _connection_message(self, exc: Exception, upload: Upload) -> str:
+        if isinstance(exc, _ShortReadError):
+            text = f"the file changed size during upload: {exc}"
+        else:
+            text = f"connection to {self._api_url} failed: {type(exc).__name__}"
+        if upload.file_size is not None and upload.file_size > MAX_UPLOAD_BYTES:
+            text += f" (the upload is {upload.file_size} bytes; the API rejects files over 25 MiB)"
+        return self._scrub(text)
 
     def query_document(
         self,
@@ -119,18 +163,32 @@ class DocQL:
                 lowered = header_name.lower()
                 if lowered == "x-request-id" or lowered.startswith("x-docql-"):
                     del request.headers[header_name]
+            # One boundary around the send AND the body read (D-09): a timeout
+            # or transport failure raised while streaming the response body is
+            # mapped exactly like a send failure, so no httpx or h11 exception
+            # ever reaches the caller. Nothing here retries: calls are paid.
+            response: httpx.Response | None = None
+            body: bytes
             try:
                 response = self._client.send(request, follow_redirects=False, stream=True)
+                body = (
+                    response.read()
+                    if 200 <= response.status_code < 300
+                    else _read_error_body(response)
+                )
             except httpx.TimeoutException as exc:
-                raise DocQLTimeoutError(f"DocQL request timed out: {exc}") from exc
-            except _ShortReadError as exc:
-                raise DocQLConnectionError(f"the file changed size during upload: {exc}") from exc
-            except httpx.TransportError as exc:
-                raise DocQLConnectionError(f"DocQL connection failed: {exc}") from exc
-            try:
-                body = response.read()
+                raise DocQLTimeoutError(
+                    self._scrub(f"DocQL request timed out after {self._timeout}")
+                ) from exc
+            except (_ShortReadError, httpx.RequestError) as exc:
+                raise DocQLConnectionError(self._connection_message(exc, upload)) from exc
+            except Exception as exc:
+                if type(exc).__module__.split(".", 1)[0] in _INTERNAL_MODULE_ROOTS:
+                    raise DocQLConnectionError(self._connection_message(exc, upload)) from exc
+                raise
             finally:
-                response.close()
+                if response is not None:
+                    response.close()
             if 200 <= response.status_code < 300:
                 return parse_result(response.status_code, response.headers, body, self._api_key)
             raise decode_error(response.status_code, response.headers, body, self._api_key)

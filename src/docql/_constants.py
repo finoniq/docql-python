@@ -26,3 +26,31 @@ DEFAULT_TIMEOUT: Final[httpx.Timeout] = httpx.Timeout(660.0, connect=10.0)
 
 # Kept characters of a non-2xx response body stored on DocQLError (D-11).
 ERROR_BODY_KEEP_CHARS: Final[int] = 2048
+
+# A non-2xx body is streamed and discarded after this many bytes, so a
+# misbehaving proxy cannot exhaust memory (T-11-12).
+ERROR_BODY_READ_LIMIT: Final[int] = 65536
+
+# The API's upload ceiling; over this, transport failures gain a size hint
+# because an early RST may have discarded the 413 (research Pitfall 4).
+MAX_UPLOAD_BYTES: Final[int] = 26_214_400
+
+# Reason constants (D-05): exactly the 14 the stub's REASON_TEXTS plus the
+# gateway's ERROR_CLASSES produce, which equals the non-null reasons of the
+# vendored contract/sdk-cases.json. The engine's wider class table stays
+# reachable through the open ``reason: str``; adding constants later is
+# backward compatible, removing them is not.
+REASON_INVALID_API_KEY: Final[str] = "invalid_api_key"
+REASON_UPLOAD_TOO_LARGE: Final[str] = "upload_too_large"
+REASON_UNSUPPORTED_MEDIA_TYPE: Final[str] = "unsupported_media_type"
+REASON_MISSING_FILE_PART: Final[str] = "missing_file_part"
+REASON_MISSING_BODY_FIELD: Final[str] = "missing_body_field"
+REASON_BODY_NOT_JSON: Final[str] = "body_not_json"
+REASON_MISSING_QUERY_OR_PROMPT: Final[str] = "missing_query_or_prompt"
+REASON_INVALID_PARAMS: Final[str] = "invalid_params"
+REASON_UNSUPPORTED_FILE_TYPE: Final[str] = "unsupported_file_type"
+REASON_CORRUPTED_FILE: Final[str] = "corrupted_file"
+REASON_DOCUMENT_EXCEEDS_TIME_BUDGET: Final[str] = "document_exceeds_time_budget"
+REASON_SERVICE_OVERLOADED: Final[str] = "service_overloaded"
+REASON_UPSTREAM_UNAVAILABLE: Final[str] = "upstream_unavailable"
+REASON_UPSTREAM_AUTH_FAILED: Final[str] = "upstream_auth_failed"

@@ -169,19 +169,37 @@ class PullMeter:
         self.pulled = 0
         self.closed = False
 
-    def stream(self) -> Iterator[bytes]:
-        try:
-            while self.pulled < 10 * 1024 * 1024:
-                self.pulled += 65536
-                yield b"x" * 65536
-        finally:
-            self.closed = True
+
+class MeteredStream(httpx.SyncByteStream):
+    """A 10 MiB body recording its pulls; close() observes the response close.
+
+    httpx's IteratorByteStream has no close(), so a generator body can never
+    observe response.close(); real network streams release their connection
+    through this exact SyncByteStream.close() hook.
+    """
+
+    def __init__(self, meter: PullMeter) -> None:
+        self.meter = meter
+
+    def __iter__(self) -> Iterator[bytes]:
+        while self.meter.pulled < 10 * 1024 * 1024:
+            self.meter.pulled += 65536
+            yield b"x" * 65536
+
+    def close(self) -> None:
+        self.meter.closed = True
 
 
 def test_error_body_read_is_bounded_and_closed() -> None:
     meter = PullMeter()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            500, headers={"content-type": "text/plain"}, stream=MeteredStream(meter)
+        )
+
     with pytest.raises(DocQLError) as excinfo:
-        query(client_with(StreamingTransport(500, meter.stream)))
+        query(client_with(httpx.MockTransport(handler)))
     err = excinfo.value
     assert err.status == 500
     assert len(err.body) <= 2048
