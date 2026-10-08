@@ -1,0 +1,254 @@
+# The release workflow (PY-01): a pushed v* tag becomes either a TestPyPI dry
+# run (rc tags, D-18) or the real PyPI release, each gated behind its
+# owner-approved environment (testpypi / pypi, named exactly as the pending
+# publishers were registered). The classify job refuses every wrong tag before
+# anything builds: shape, pyproject/CHANGELOG agreement, the exact version not
+# yet on its index (D-19), and — for a final tag — an rc tag on the same commit.
+# Every upload is then verified from a clean venv: install from the index and
+# the README quickstart against the digest-pinned stub; the PyPI release also
+# proves provenance and attestations (D-20).
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  classify:
+    name: classify
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      channel: ${{ steps.classify.outputs.channel }}
+      version: ${{ steps.classify.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0  # the rc-tag check reads the other tags (D-18)
+      - name: validate the tag and route the channel
+        id: classify
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          scripts/release-classify.sh
+
+  ci:
+    needs: [classify]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+
+  contract:
+    needs: [classify]
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/contract.yml
+    secrets: inherit
+
+  build:
+    needs: [classify, ci, contract]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      CHANNEL: ${{ needs.classify.outputs.channel }}
+      VERSION: ${{ needs.classify.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          enable-cache: false
+      - name: stamp the rc version (dry-run channel only)
+        if: env.CHANNEL == 'testpypi'
+        run: |
+          set -euo pipefail
+          uv version --frozen "$VERSION"
+      - name: build the wheel and the sdist
+        run: |
+          set -euo pipefail
+          uv build --no-sources
+      - name: dist holds exactly the wheel and the sdist
+        run: |
+          set -euo pipefail
+          wheel="docql-$VERSION-py3-none-any.whl"
+          sdist="docql-$VERSION.tar.gz"
+          [ -f "dist/$wheel" ]
+          [ -f "dist/$sdist" ]
+          [ "$(find dist -maxdepth 1 -type f | wc -l)" -eq 2 ]
+      - name: each artifact installs and reports the version
+        run: |
+          set -euo pipefail
+          for f in "dist/docql-$VERSION-py3-none-any.whl" "dist/docql-$VERSION.tar.gz"; do
+            tmp=$(mktemp -d)
+            uv venv --python 3.11 "$tmp/v"
+            uv pip install --python "$tmp/v/bin/python" "$f"
+            (cd "$tmp" && "$tmp/v/bin/python" -I -c 'import sys, docql; sys.exit(0 if docql.__version__ == sys.argv[1] else 1)' "$VERSION")
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish-testpypi:
+    name: publish-testpypi
+    needs: [classify, build]
+    if: needs.classify.outputs.channel == 'testpypi'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/docql
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          attestations: true
+          print-hash: true
+
+  verify-testpypi:
+    name: verify-testpypi
+    needs: [classify, publish-testpypi]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    env:
+      VERSION: ${{ needs.classify.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          enable-cache: false
+      - name: clean venv, install docql from TestPyPI (no deps) and httpx from PyPI
+        run: |
+          set -euo pipefail
+          VENV="$RUNNER_TEMP/v"
+          uv venv --seed --python 3.11 "$VENV"
+          n=0
+          until "$VENV/bin/pip" install --no-cache-dir --no-deps --index-url https://test.pypi.org/simple/ "docql==$VERSION"; do
+            n=$((n + 1))
+            if [ "$n" -ge 10 ]; then
+              echo "verify-testpypi: install from TestPyPI never succeeded" >&2
+              exit 1
+            fi
+            sleep 30
+          done
+          "$VENV/bin/pip" install --no-cache-dir "httpx>=0.27,<1"
+      - name: README quickstart against the pinned stub
+        run: |
+          set -euo pipefail
+          scripts/stub-up.sh --run "$RUNNER_TEMP/v/bin/python" scripts/run_readme.py --expect-version "$VERSION"
+
+  publish-pypi:
+    name: publish-pypi
+    needs: [classify, build]
+    if: needs.classify.outputs.channel == 'pypi'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/p/docql
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33  # v1.14.2
+        with:
+          attestations: true
+          print-hash: true
+
+  verify-pypi:
+    name: verify-pypi
+    needs: [classify, publish-pypi]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: read
+    env:
+      VERSION: ${{ needs.classify.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          enable-cache: false
+      - name: clean venv, install docql from PyPI
+        run: |
+          set -euo pipefail
+          VENV="$RUNNER_TEMP/v"
+          uv venv --seed --python 3.11 "$VENV"
+          n=0
+          until "$VENV/bin/pip" install --no-cache-dir "docql==$VERSION"; do
+            n=$((n + 1))
+            if [ "$n" -ge 10 ]; then
+              echo "verify-pypi: install from PyPI never succeeded" >&2
+              exit 1
+            fi
+            sleep 30
+          done
+      - name: README quickstart against the pinned stub
+        run: |
+          set -euo pipefail
+          scripts/stub-up.sh --run "$RUNNER_TEMP/v/bin/python" scripts/run_readme.py --expect-version "$VERSION"
+      - name: provenance and attestations
+        run: |
+          set -euo pipefail
+          wheel="docql-$VERSION-py3-none-any.whl"
+          sdist="docql-$VERSION.tar.gz"
+          files="$(curl -fsS --max-time 30 "https://pypi.org/pypi/docql/$VERSION/json" | jq -r '.urls[].filename' | sort)"
+          expected="$(printf '%s\n%s\n' "$sdist" "$wheel" | sort)"
+          if [ "$files" != "$expected" ]; then
+            echo "verify-pypi: the release files on PyPI are not exactly the wheel and the sdist" >&2
+            exit 1
+          fi
+          for file in "$wheel" "$sdist"; do
+            curl -fsS --max-time 30 "https://pypi.org/integrity/docql/$VERSION/$file/provenance" \
+              | jq -e '.attestation_bundles[].publisher
+                  | select(.kind == "GitHub"
+                      and .repository == "finoniq/docql-python"
+                      and .workflow == "release.yml"
+                      and .environment == "pypi")' >/dev/null
+            uvx --from "pypi-attestations==0.0.30" pypi-attestations verify pypi \
+              --repository https://github.com/finoniq/docql-python "pypi:$file"
+            echo "ATTESTATION_OK $file"
+          done
+          echo "RELEASE_VERIFY_OK"
