@@ -20,7 +20,8 @@ DECODE_CASE_IDS = [
 ]
 
 API_KEY = "secret-key-123"
-NOW = datetime(2026, 10, 8, 12, 0, 0, 800000, tzinfo=UTC)  # .8 s past the minute
+NOW_WHOLE = datetime(2026, 10, 8, 12, 0, 1, tzinfo=UTC)  # an integral-second "now"
+NOW_SUB_SECOND = datetime(2026, 10, 8, 12, 0, 0, 800000, tzinfo=UTC)  # .8 s past the minute
 
 
 def envelope_body(reason: str, error_info: str, request_id: str | None = "req-1") -> bytes:
@@ -35,8 +36,8 @@ def vendored_case(case_id: str, sdk_cases: dict[str, Any]) -> dict[str, Any]:
     return next(c for c in sdk_cases["decodeCases"] if c["id"] == case_id)
 
 
-def http_date(second: int, minute: int = 0) -> str:
-    return format_datetime(datetime(2026, 10, 8, 12, minute, second, tzinfo=UTC), usegmt=True)
+def http_date(second: int, minute: int = 0, hour: int = 12) -> str:
+    return format_datetime(datetime(2026, 10, 8, hour, minute, second, tzinfo=UTC), usegmt=True)
 
 
 @pytest.mark.parametrize("case_id", DECODE_CASE_IDS)
@@ -85,9 +86,11 @@ def test_envelope_429_with_retry_after_header() -> None:
 
 
 def test_parse_retry_after_http_date_uses_injected_now() -> None:
-    assert _response.parse_retry_after(http_date(31), now=NOW) == 30  # exactly 30.0 s
-    assert _response.parse_retry_after(http_date(30), now=NOW) == 30  # 29.2 s rounds up
-    assert _response.parse_retry_after(http_date(0, minute=59), now=NOW) == 0  # past, clamped
+    assert _response.parse_retry_after(http_date(31), now=NOW_WHOLE) == 30  # exactly 30.0 s
+    assert _response.parse_retry_after(http_date(30), now=NOW_SUB_SECOND) == 30  # 29.2 s -> 30
+    assert (
+        _response.parse_retry_after(http_date(0, minute=59, hour=11), now=NOW_SUB_SECOND) == 0
+    )  # clamped
 
 
 @pytest.mark.parametrize("value", ["soon", "-1", ""])
@@ -158,6 +161,7 @@ def test_key_scrubbed_from_body_message_str_and_repr() -> None:
     err = decode_error(401, {}, body, api_key=API_KEY)
     assert API_KEY not in err.body
     assert "***" in err.body
+    assert err.message is not None
     assert API_KEY not in err.message
     assert "***" in err.message
     assert API_KEY not in str(err)
@@ -177,8 +181,9 @@ def test_parse_result_non_json_body_raises(body: bytes) -> None:
 
 
 def test_parse_result_data_not_an_object_raises() -> None:
-    with pytest.raises(DocQLError, match="data is not a JSON object"):
+    with pytest.raises(DocQLError) as excinfo:
         parse_result(200, {}, b'{"data": [1]}', api_key=API_KEY)
+    assert excinfo.value.message == "unexpected response: data is not a JSON object"
 
 
 @pytest.mark.parametrize("body", [b"{}", b'{"data": null}'])
