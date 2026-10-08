@@ -1,0 +1,74 @@
+# Continuous integration for the docql Python SDK (PY-05): lint and strict
+# types, the unit suite on every supported interpreter, and the httpx floor
+# (lowest-direct resolves httpx 0.27.0, the declared minimum). The contract
+# suite against the pinned stub lives in contract.yml. This workflow is
+# reusable (workflow_call) so release.yml runs the same checks on a tag.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          python-version: "3.11"
+      - run: uv sync --locked
+      - run: uv run --locked ruff check
+      - run: uv run --locked ruff format --check
+      - run: uv run --locked mypy --strict
+
+  unit:
+    name: unit (${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv sync --locked
+      - name: interpreter matches the matrix cell
+        env:
+          EXPECTED_PYTHON: ${{ matrix.python }}
+        run: |
+          set -euo pipefail
+          uv run --locked python -c "import os, sys; e = os.environ['EXPECTED_PYTHON']; assert sys.version_info[:2] == tuple(int(p) for p in e.split('.')), (sys.version_info[:2], e)"
+      - run: uv run --locked pytest -m "not contract" -q
+
+  lowest-direct:
+    name: lowest-direct (httpx floor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          python-version: "3.11"
+      - run: uv sync --resolution lowest-direct
+      - name: httpx resolved to the declared floor
+        run: |
+          set -euo pipefail
+          uv run --no-sync python -c "import httpx; assert httpx.__version__ == '0.27.0', httpx.__version__"
+      - run: uv run --no-sync pytest -m "not contract" -q
