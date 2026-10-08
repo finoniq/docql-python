@@ -86,9 +86,12 @@ jobs:
           set -euo pipefail
           wheel="docql-$VERSION-py3-none-any.whl"
           sdist="docql-$VERSION.tar.gz"
-          [ -f "dist/$wheel" ]
-          [ -f "dist/$sdist" ]
-          [ "$(find dist -maxdepth 1 -type f | wc -l)" -eq 2 ]
+          # uv build also writes dist/.gitignore (a lone `*`) so the artifacts dir
+          # stays ignored; assert the exact set of non-hidden files instead of
+          # counting every regular file (which is 3, not 2, since uv 0.12).
+          actual="$(find dist -maxdepth 1 -type f ! -name '.*' -printf '%f\n' | sort)"
+          expected="$(printf '%s\n%s\n' "$sdist" "$wheel" | sort)"
+          [ "$actual" = "$expected" ]
       - name: each artifact installs and reports the version
         run: |
           set -euo pipefail
