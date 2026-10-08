@@ -1,0 +1,53 @@
+[project]
+name = "docql"
+version = "0.1.0"
+description = "Python client for the DocQL document-extraction API"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Finoniq" }]
+dependencies = ["httpx>=0.27,<1"]
+classifiers = [
+    "Typing :: Typed",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://github.com/finoniq/docql-python"
+Repository = "https://github.com/finoniq/docql-python"
+Issues = "https://github.com/finoniq/docql-python/issues"
+Changelog = "https://github.com/finoniq/docql-python/releases"
+
+[dependency-groups]
+dev = ["pytest>=9.1.1", "mypy>=2.4.0", "ruff>=0.16.10"]
+
+[build-system]
+requires = ["uv_build>=0.12.23,<0.13"]
+build-backend = "uv_build"
+
+[tool.mypy]
+strict = true
+python_version = "3.11"
+# scripts/ holds only shell files until run-readme.py lands; mypy exits 2 on a
+# .py-free directory, so it joins the file list when that script exists.
+files = ["src", "tests"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-markers --import-mode=importlib"
+testpaths = ["tests"]
+markers = [
+    "contract: needs the digest-pinned docql-stub (DOCQL_STUB_URL)",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
