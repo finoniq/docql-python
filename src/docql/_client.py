@@ -3,7 +3,7 @@
 import os
 import platform
 from types import TracebackType
-from typing import Self
+from typing import BinaryIO, Self
 
 import httpx
 
@@ -16,7 +16,7 @@ from docql._constants import (
     QUERY_PATH,
 )
 from docql._errors import DocQLConnectionError, DocQLTimeoutError
-from docql._request import prepare_upload
+from docql._request import _ShortReadError, prepare_upload
 from docql._response import QueryResult, decode_error, parse_result
 from docql._version import __version__
 
@@ -79,14 +79,19 @@ class DocQL:
 
     def query_document(
         self,
-        file: bytes,
+        file: str | os.PathLike[str] | bytes | BinaryIO,
         *,
         query: str | None = None,
         prompt: str | None = None,
         mode: str | None = None,
         filename: str | None = None,
     ) -> QueryResult:
-        """Upload one document and answer its extraction result (D-03/D-04)."""
+        """Upload one document and answer its extraction result (D-03/D-04).
+
+        ``file`` is a path (``str`` or ``os.PathLike``), raw ``bytes``, or a
+        binary file object read from its current position and never closed
+        (D-13/D-16).
+        """
         with prepare_upload(
             file, query=query, prompt=prompt, mode=mode, filename=filename
         ) as upload:
@@ -118,6 +123,8 @@ class DocQL:
                 response = self._client.send(request, follow_redirects=False, stream=True)
             except httpx.TimeoutException as exc:
                 raise DocQLTimeoutError(f"DocQL request timed out: {exc}") from exc
+            except _ShortReadError as exc:
+                raise DocQLConnectionError(f"the file changed size during upload: {exc}") from exc
             except httpx.TransportError as exc:
                 raise DocQLConnectionError(f"DocQL connection failed: {exc}") from exc
             try:

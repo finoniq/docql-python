@@ -124,6 +124,8 @@ class LyingLongStream:
         self._declared = declared
 
     def read(self, size: int = -1) -> bytes:
+        if size == 0:  # the type-check probe consumes nothing
+            return b""
         chunk, self._data = self._data, b""
         return chunk
 
@@ -306,9 +308,9 @@ def test_unmeasurable_stream_sends_chunked(label: str, factory: Callable[[bytes]
     calls: list[httpx.Request] = []
     client = make_client(recording_handler(calls))
     client.query_document(
-        factory(FILE_BYTES),
+        factory(FILE_BYTES),  # type: ignore[arg-type]
         filename="doc.pdf",
-        query="q",  # type: ignore[arg-type]
+        query="q",
     )
     request = calls[0]
     assert "content-length" not in request.headers
@@ -324,9 +326,9 @@ def test_short_read_raises_connection_error_naming_the_change() -> None:
     client = make_client(consuming_handler(calls))
     with pytest.raises(DocQLConnectionError, match="the file changed size during upload"):
         client.query_document(
-            LyingShortStream(10),
+            LyingShortStream(10),  # type: ignore[arg-type]
             filename="doc.pdf",
-            query="q",  # type: ignore[arg-type]
+            query="q",
         )
 
 
@@ -335,9 +337,9 @@ def test_over_reporting_stream_sends_exactly_the_measured_length() -> None:
     client = make_client(recording_handler(calls))
     data = bytes(range(256)) * 8
     client.query_document(
-        LyingLongStream(data, 10),
+        LyingLongStream(data, 10),  # type: ignore[arg-type]
         filename="doc.pdf",
-        query="q",  # type: ignore[arg-type]
+        query="q",
     )
     request = calls[0]
     assert file_part(request) == data[:10]
