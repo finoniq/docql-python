@@ -42,6 +42,36 @@ EXPECTED_ALL = sorted(
 )
 
 
+# The exact v0.1.0 export list (tests/unit/test_constants.py at tag v0.1.0), frozen:
+# v0.2 may add names, never remove or rename one (JSDK-03).
+V01_ALL = [
+    "DocQL",
+    "DocQLConnectionError",
+    "DocQLError",
+    "DocQLException",
+    "DocQLTimeoutError",
+    "MODE_FAST",
+    "MODE_STANDARD",
+    "Mode",
+    "QueryResult",
+    "REASON_BODY_NOT_JSON",
+    "REASON_CORRUPTED_FILE",
+    "REASON_DOCUMENT_EXCEEDS_TIME_BUDGET",
+    "REASON_INVALID_API_KEY",
+    "REASON_INVALID_PARAMS",
+    "REASON_MISSING_BODY_FIELD",
+    "REASON_MISSING_FILE_PART",
+    "REASON_MISSING_QUERY_OR_PROMPT",
+    "REASON_SERVICE_OVERLOADED",
+    "REASON_UNSUPPORTED_FILE_TYPE",
+    "REASON_UNSUPPORTED_MEDIA_TYPE",
+    "REASON_UPLOAD_TOO_LARGE",
+    "REASON_UPSTREAM_AUTH_FAILED",
+    "REASON_UPSTREAM_UNAVAILABLE",
+    "__version__",
+]
+
+
 def reason_items() -> dict[str, str]:
     """The module's REASON_* constants as a name -> value dict."""
     return {
@@ -84,3 +114,7 @@ def test_reason_values_equal_the_vendored_case_reasons(
 
 def test_all_exports_exactly() -> None:
     assert sorted(docql.__all__) == EXPECTED_ALL
+
+
+def test_v01_surface_is_a_subset() -> None:
+    assert set(V01_ALL) <= set(docql.__all__)

@@ -18,6 +18,18 @@ DECODE_CASE_IDS = [
     case["id"]
     for case in json.loads((ROOT / "contract" / "sdk-cases.json").read_bytes())["decodeCases"]
 ]
+JOB_DECODE_CASES: list[dict[str, Any]] = json.loads(
+    (ROOT / "contract" / "job-cases.json").read_bytes()
+)["decodeCases"]
+# Every non-2xx decode case either kit knows (sdk-cases.json v2, job-cases.json v3).
+KIT_ERROR_CASES: list[dict[str, Any]] = [
+    case
+    for case in json.loads((ROOT / "contract" / "sdk-cases.json").read_bytes())["decodeCases"]
+    + JOB_DECODE_CASES
+    if case["status"] >= 400
+]
+RETRYABLE_CASES = [case for case in KIT_ERROR_CASES if case["status"] in (429, 503)]
+JOB_ERROR_CASES = [case for case in JOB_DECODE_CASES if case["status"] >= 400]
 
 API_KEY = "secret-key-123"
 NOW_WHOLE = datetime(2026, 10, 8, 12, 0, 1, tzinfo=UTC)  # an integral-second "now"
@@ -213,3 +225,32 @@ def test_parse_result_request_id_falls_back_to_header_then_empty() -> None:
     assert from_header.request_id == "header-id"
     neither = parse_result(200, {}, b'{"data": {}}', api_key=API_KEY)
     assert neither.request_id == ""
+
+
+def decode_kit_case(case: dict[str, Any]) -> DocQLError:
+    return decode_error(
+        case["status"], case.get("headers") or {}, case["bodyUtf8"].encode(), api_key=API_KEY
+    )
+
+
+@pytest.mark.parametrize("case", RETRYABLE_CASES, ids=[c["id"] for c in RETRYABLE_CASES])
+def test_retry_after_on_every_429_and_503(case: dict[str, Any]) -> None:
+    err = decode_kit_case(case)
+    header = (case.get("headers") or {}).get("retry-after")
+    assert err.retryable is True
+    assert err.retry_after == (int(header) if header is not None else None)
+
+
+@pytest.mark.parametrize("case", JOB_ERROR_CASES, ids=[c["id"] for c in JOB_ERROR_CASES])
+def test_job_error_decode_cases(case: dict[str, Any]) -> None:
+    err = decode_kit_case(case)
+    expect = case["expect"]
+    assert err.status == expect["status"]
+    assert err.reason == expect["reason"]
+    assert err.request_id == expect["requestId"]
+    assert err.retryable is (case["status"] in (429, 503))
+
+
+@pytest.mark.parametrize("case", KIT_ERROR_CASES, ids=[c["id"] for c in KIT_ERROR_CASES])
+def test_retryable_exactly_for_the_kit_429_and_503_cases(case: dict[str, Any]) -> None:
+    assert decode_kit_case(case).retryable is (case["status"] in (429, 503))
