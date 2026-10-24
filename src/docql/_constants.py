@@ -35,9 +35,9 @@ ERROR_BODY_READ_LIMIT: Final[int] = 65536
 # because an early RST may have discarded the 413 (research Pitfall 4).
 MAX_UPLOAD_BYTES: Final[int] = 26_214_400
 
-# Reason constants (D-05): exactly the 14 the stub's REASON_TEXTS plus the
-# gateway's ERROR_CLASSES produce, which equals the non-null reasons of the
-# vendored contract/sdk-cases.json. The engine's wider class table stays
+# Reason constants (D-05, D-09): exactly the 22 non-null reasons of the vendored
+# contract kit — contract/sdk-cases.json (the sync stub and gateway errors) plus
+# contract/job-cases.json (the job errors). The engine's wider class table stays
 # reachable through the open ``reason: str``; adding constants later is
 # backward compatible, removing them is not.
 REASON_INVALID_API_KEY: Final[str] = "invalid_api_key"
@@ -54,3 +54,11 @@ REASON_DOCUMENT_EXCEEDS_TIME_BUDGET: Final[str] = "document_exceeds_time_budget"
 REASON_SERVICE_OVERLOADED: Final[str] = "service_overloaded"
 REASON_UPSTREAM_UNAVAILABLE: Final[str] = "upstream_unavailable"
 REASON_UPSTREAM_AUTH_FAILED: Final[str] = "upstream_auth_failed"
+REASON_CONCURRENCY_LIMIT_EXCEEDED: Final[str] = "concurrency_limit_exceeded"
+REASON_RATE_LIMIT_EXCEEDED: Final[str] = "rate_limit_exceeded"
+REASON_JOB_NOT_FOUND: Final[str] = "job_not_found"
+REASON_JOB_EXPIRED: Final[str] = "job_expired"
+REASON_QUEUE_FULL: Final[str] = "queue_full"
+REASON_IDEMPOTENCY_KEY_CONFLICT: Final[str] = "idempotency_key_conflict"
+REASON_IDEMPOTENCY_IN_PROGRESS: Final[str] = "idempotency_in_progress"
+REASON_JOB_INTERRUPTED: Final[str] = "job_interrupted"
