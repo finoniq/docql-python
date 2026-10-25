@@ -88,3 +88,10 @@ RETRY_AFTER_ABSENT: Final[int] = 1
 
 # Transient poll failures without Retry-After back off 1, 2, 4, 8, 16, 30 s (D-04).
 TRANSIENT_BACKOFF_CAP: Final[int] = 30
+
+# Submit safety (D-07, DocQL handoff Revision 2026-10-21: "treat every submit 503 as
+# 'a job may exist' and retry with the same Idempotency-Key"). One submit_document()
+# call makes at most 4 attempts, all with the same key; a retry without Retry-After
+# sleeps 1, 2, then 4 s. Go and Java use the same two numbers.
+SUBMIT_MAX_ATTEMPTS: Final[int] = 4
+SUBMIT_BACKOFF: Final[tuple[int, ...]] = (1, 2, 4)

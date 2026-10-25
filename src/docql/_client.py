@@ -15,19 +15,15 @@ from docql._constants import (
     ENV_API_KEY,
     ENV_API_URL,
     ERROR_BODY_READ_LIMIT,
-    JOBS_PATH,
     MAX_UPLOAD_BYTES,
     QUERY_PATH,
 )
 from docql._errors import DocQLConnectionError, DocQLTimeoutError
 from docql._jobs import (
     Job,
-    _send_once,
     cancel,
     fetch_job,
-    new_idempotency_key,
-    parse_job,
-    validate_idempotency_key,
+    submit_with_retry,
     wait_for,
 )
 from docql._request import Upload, _ShortReadError, prepare_upload
@@ -221,36 +217,36 @@ class DocQL:
         filename: str | None = None,
         idempotency_key: str | None = None,
     ) -> Job:
-        """Submit one document as an async job and answer the queued Job (JSDK-01).
+        """Submit one document as an async job and answer the queued Job (JSDK-01, JSDK-02).
 
         The upload is built exactly as ``query_document`` builds it. Every
         submit carries one ``Idempotency-Key``: ``idempotency_key`` when given
-        (1-255 printable ASCII characters, else ValueError before any I/O),
-        else a fresh random key. The key is on the returned Job and on every
-        error this call raises, so a caller can safely retry with it; a failed
-        job needs a new key, because the old one replays the failure for 24 h.
+        (1-255 printable ASCII characters, 0x20-0x7E, else ValueError before any
+        I/O), else a fresh random key. DocQL scopes the key to your organisation
+        and remembers it for 24 h (OD-14).
+
+        A 503 may mean the job was created anyway, so a 503 and a 409
+        ``idempotency_in_progress`` are retried with the same key, at most 4
+        attempts in total, sleeping the server's ``Retry-After`` (clamped to
+        [1, 30] s) or 1, 2, 4 s. The retry happens only when the input can be
+        replayed: a path, ``bytes``, or a seekable file object, which is rewound
+        to the position it had when you called this method and to no other
+        position; it is never closed. Any other input is sent once. A 429,
+        every other error, a connection error and a timeout are never retried.
+
+        The key is on the returned Job and on every error this call raises, so
+        you can retry safely with it. A job that ended ``failed`` (including
+        ``job_interrupted``) needs a new key: the old one replays the failure.
         """
-        key = (
-            validate_idempotency_key(idempotency_key)
-            if idempotency_key is not None
-            else new_idempotency_key()
+        return submit_with_retry(
+            self,
+            file,
+            query=query,
+            prompt=prompt,
+            mode=mode,
+            filename=filename,
+            idempotency_key=idempotency_key,
         )
-        with prepare_upload(
-            file, query=query, prompt=prompt, mode=mode, filename=filename
-        ) as upload:
-            status, headers, body = _send_once(
-                self,
-                "POST",
-                JOBS_PATH,
-                upload=upload,
-                idempotency_keys=(key,),
-                timeout=self._timeout,
-            )
-        if 200 <= status < 300:
-            return parse_job(status, headers, body, self._api_key, idempotency_key=key)
-        error = decode_error(status, headers, body, self._api_key)
-        error.idempotency_key = key
-        raise error
 
     def get_job(self, job_id: str) -> Job:
         """Fetch the job once and answer it (T-E2).

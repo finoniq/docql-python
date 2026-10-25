@@ -1,4 +1,4 @@
-"""Async jobs: the Job model, one-request primitive and the wait state machine (JSDK-01).
+"""Async jobs: the Job model, one-request primitive, the submit retry and the wait (JSDK-01/02).
 
 The wait loop is a copy of the contract kit's reference ``waitForJob``
 (docql-console ``apps/docql-stub/test/job-kit.ts``), so every SDK makes the same
@@ -17,6 +17,10 @@ requests and reaches the same outcome on the kit's ``waitCases``:
   default) and raises :class:`DocQLWaitTimeoutError`. The wait never cancels the
   job, on any path: cancelling is only the caller's explicit ``cancel_job()``.
 
+Submits (:func:`submit_with_retry`, D-07) carry one ``Idempotency-Key`` and
+retry a 503 or a 409 ``idempotency_in_progress`` with that same key, at most 4
+attempts, and only when the input can be replayed from its start.
+
 This module does not touch ``query_document``: its send block is copied, not
 shared, so the v0.1 request path stays byte-identical (research Pitfall 12).
 """
@@ -24,6 +28,7 @@ shared, so the v0.1 request path stays byte-identical (research Pitfall 12).
 from __future__ import annotations
 
 import json
+import os
 import platform
 import secrets
 import time
@@ -31,7 +36,7 @@ import urllib.parse
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, BinaryIO, cast
 
 import httpx
 
@@ -42,9 +47,12 @@ from docql._constants import (
     JOB_STATUS_SUCCEEDED,
     JOBS_PATH,
     POLL_READ_TIMEOUT,
+    REASON_IDEMPOTENCY_IN_PROGRESS,
     RETRY_AFTER_ABSENT,
     RETRY_AFTER_CAP,
     RETRY_AFTER_FLOOR,
+    SUBMIT_BACKOFF,
+    SUBMIT_MAX_ATTEMPTS,
     TRANSIENT_BACKOFF_CAP,
 )
 from docql._errors import (
@@ -53,7 +61,13 @@ from docql._errors import (
     DocQLTimeoutError,
     DocQLWaitTimeoutError,
 )
-from docql._request import Upload, _ShortReadError
+from docql._request import (
+    Upload,
+    _is_binary_stream,
+    _remaining_length,
+    _ShortReadError,
+    prepare_upload,
+)
 from docql._response import (
     QueryResult,
     _header,
@@ -300,6 +314,109 @@ def _job_error(
     error = decode_error(status, headers, body, api_key)
     error.job_id = job_id
     return error
+
+
+def _is_replayable(file: object) -> bool:
+    """True when the submit body can be rebuilt byte for byte from its start (D-07).
+
+    A path (``str`` / ``os.PathLike``) is re-opened and ``bytes`` are kept, so
+    both replay. A binary file object replays only when ``seekable()`` is True
+    and ``tell()``/``seek()`` work (v0.1's ``_remaining_length`` measures it):
+    the retry rewinds it to the position recorded before the first attempt.
+    Anything else (a pipe, a socket, ``sys.stdin.buffer``, an HTTP response
+    stream) cannot be replayed, so its submit is never retried.
+    """
+    if isinstance(file, (str, os.PathLike, bytes)):
+        return True
+    if not _is_binary_stream(file):
+        return False
+    seekable = getattr(file, "seekable", None)
+    if not callable(seekable):
+        return False
+    try:
+        if not seekable():
+            return False
+    except (OSError, ValueError):
+        return False
+    return _remaining_length(cast("BinaryIO", file)) is not None
+
+
+def submit_with_retry(
+    client: DocQL,
+    file: str | os.PathLike[str] | bytes | BinaryIO,
+    *,
+    query: str | None,
+    prompt: str | None,
+    mode: str | None,
+    filename: str | None,
+    idempotency_key: str | None,
+) -> Job:
+    """Submit a job with one Idempotency-Key and a bounded same-key retry (JSDK-02, D-07, D-08).
+
+    DocQL's handoff (Revision 2026-10-21) says a submit 503 may already have
+    created the job: "treat every submit 503 as 'a job may exist' and retry
+    with the same Idempotency-Key". So, with the same key on every attempt and
+    at most ``SUBMIT_MAX_ATTEMPTS`` attempts:
+
+    * any 503, and a 409 ``idempotency_in_progress`` (another submit with this
+      key is still being persisted), is retried when the input is replayable
+      (:func:`_is_replayable`); each sleep is ``Retry-After`` clamped to
+      [1, 30] s, else 1, 2, 4 s (``SUBMIT_BACKOFF``);
+    * a 429 (``queue_full``, ``rate_limit_exceeded``,
+      ``concurrency_limit_exceeded``: no job exists), every other status, a
+      transport error and a timeout are raised at once;
+    * a key is never regenerated for a retry (a new key could create a second
+      billable job), and a stream is only ever rewound to its recorded start.
+
+    Every error raised here carries ``idempotency_key`` so the caller can retry
+    safely with it. Go (``SubmitDocument``) and Java (``submitDocument``) copy
+    this loop: same cap, same backoff, same retryable set.
+    """
+    key = (
+        validate_idempotency_key(idempotency_key)
+        if idempotency_key is not None
+        else new_idempotency_key()
+    )
+    replayable = _is_replayable(file)
+    stream: BinaryIO | None = None
+    start = 0
+    if replayable and not isinstance(file, (str, os.PathLike, bytes)):
+        stream = file
+        start = stream.tell()
+    attempt = 0
+    while True:
+        attempt += 1
+        if attempt > 1 and stream is not None:
+            stream.seek(start)
+        with prepare_upload(
+            file, query=query, prompt=prompt, mode=mode, filename=filename
+        ) as upload:
+            status, headers, body = _send_once(
+                client,
+                "POST",
+                JOBS_PATH,
+                upload=upload,
+                idempotency_keys=(key,),
+                timeout=client._timeout,
+            )
+        if 200 <= status < 300:
+            try:
+                return parse_job(status, headers, body, client._api_key, idempotency_key=key)
+            except DocQLError as unusable:
+                unusable.idempotency_key = key
+                raise
+        error = decode_error(status, headers, body, client._api_key)
+        error.idempotency_key = key
+        retryable = status == 503 or (
+            status == 409 and error.reason == REASON_IDEMPOTENCY_IN_PROGRESS
+        )
+        if not (retryable and replayable and attempt < SUBMIT_MAX_ATTEMPTS):
+            raise error
+        server = parse_retry_after(_header(headers, "retry-after"))
+        if server is not None:
+            _sleep(min(max(server, RETRY_AFTER_FLOOR), RETRY_AFTER_CAP))
+        else:
+            _sleep(SUBMIT_BACKOFF[attempt - 1])
 
 
 def fetch_job(client: DocQL, job_id: str) -> Job:
