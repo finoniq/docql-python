@@ -55,6 +55,25 @@ jobs:
           python-version: "3.11"
       - run: uv sync --locked
       - name: shared case list against the pinned stub
-        run: scripts/stub-up.sh --run env DOCQL_REQUIRE_STUB=1 uv run --locked pytest -m contract -q -rA
+        # shell: bash adds pipefail, so the tee never hides a pytest failure.
+        shell: bash
+        run: scripts/stub-up.sh --run env DOCQL_REQUIRE_STUB=1 uv run --locked pytest -m contract -q -rA | tee "$RUNNER_TEMP/contract.log"
+      - name: every stub job case ran and passed (JSDK-04 exact-count gate)
+        # A silently skipped or deselected job case must fail the run: the PASSED
+        # test_job_case lines must equal the kit's count of stub cases the SDK replays.
+        shell: bash
+        run: |
+          WANT=$(jq '[.cases[] | select(.target == "stub" and (.via == "submit" or .via == "poll" or .via == "cancel" or .via == "wait"))] | length' contract/job-cases.json)
+          ran=$(grep -cE '^PASSED tests/contract/test_job_cases\.py::test_job_case\[' "$RUNNER_TEMP/contract.log" || true)
+          bad=$(grep -cE '^(FAILED|SKIPPED|ERROR)( \[[0-9]+\])? tests/contract/test_job_cases\.py' "$RUNNER_TEMP/contract.log" || true)
+          echo "JOB_CASES_RAN $ran (want $WANT)"
+          if [ "$bad" -ne 0 ]; then
+            echo "test_job_cases.py has $bad FAILED/SKIPPED/ERROR lines" >&2
+            exit 1
+          fi
+          if [ "$WANT" -eq 0 ] || [ "$ran" -ne "$WANT" ]; then
+            echo "expected $WANT job-case PASSED lines, saw $ran" >&2
+            exit 1
+          fi
       - name: README quickstart
         run: scripts/stub-up.sh --run uv run --locked python scripts/run_readme.py
