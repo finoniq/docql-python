@@ -11,7 +11,8 @@ import pytest
 
 from docql import _response
 from docql._errors import DocQLError
-from docql._response import decode_error, parse_result
+from docql._jobs import parse_job
+from docql._response import QueryResult, decode_error, parse_result
 
 ROOT = Path(__file__).resolve().parents[2]
 DECODE_CASE_IDS = [
@@ -30,6 +31,7 @@ KIT_ERROR_CASES: list[dict[str, Any]] = [
 ]
 RETRYABLE_CASES = [case for case in KIT_ERROR_CASES if case["status"] in (429, 503)]
 JOB_ERROR_CASES = [case for case in JOB_DECODE_CASES if case["status"] >= 400]
+JOB_SUCCESS_CASES = [case for case in JOB_DECODE_CASES if case["status"] < 300]
 
 API_KEY = "secret-key-123"
 NOW_WHOLE = datetime(2026, 10, 8, 12, 0, 1, tzinfo=UTC)  # an integral-second "now"
@@ -254,3 +256,45 @@ def test_job_error_decode_cases(case: dict[str, Any]) -> None:
 @pytest.mark.parametrize("case", KIT_ERROR_CASES, ids=[c["id"] for c in KIT_ERROR_CASES])
 def test_retryable_exactly_for_the_kit_429_and_503_cases(case: dict[str, Any]) -> None:
     assert decode_kit_case(case).retryable is (case["status"] in (429, 503))
+
+
+@pytest.mark.parametrize("case", JOB_SUCCESS_CASES, ids=[c["id"] for c in JOB_SUCCESS_CASES])
+def test_job_success_decode_cases(case: dict[str, Any]) -> None:
+    """Every 2xx job shape of the kit decodes through parse_job (kit decode rule)."""
+    headers = case.get("headers") or {}
+    body = json.loads(case["bodyUtf8"])
+    job = parse_job(case["status"], headers, case["bodyUtf8"].encode(), api_key=API_KEY)
+    expect = case["expect"]
+    assert job.job_id == expect["jobId"]
+    assert job.status == expect["jobStatus"]
+    assert job.request_id == expect["requestId"]
+    assert job.page_count == body["metadata"]["page_count"]
+    assert job.pages_done == body["metadata"]["pages_done"]
+    header = headers.get("retry-after")
+    assert job.retry_after == (int(header) if header is not None else None)
+    assert job.idempotency_key is None
+    for name in ("created_at", "started_at", "finished_at", "expires_at"):
+        value = getattr(job, name)
+        if body.get(name) is None:
+            assert value is None
+        else:
+            assert value is not None
+            assert value.utcoffset() is not None
+            assert value.utcoffset().total_seconds() == 0
+            assert value == datetime.fromisoformat(body[name])
+    if job.status == "succeeded":
+        assert isinstance(job.result, QueryResult)
+        assert job.result.data == body["result"]["data"]
+        assert job.result.page_count == body["result"]["metadata"]["page_count"]
+        assert job.error is None
+    elif job.status == "failed":
+        assert job.result is None
+        assert isinstance(job.error, DocQLError)
+        assert job.error.reason in ("upstream_unavailable", "job_interrupted")
+        assert job.error.reason == body["error"]["metadata"]["reason"]
+        assert job.error.status == body["error"]["status_code"]
+        assert job.error.job_id == expect["jobId"]
+        assert job.error.retryable is False
+    else:
+        assert job.result is None
+        assert job.error is None

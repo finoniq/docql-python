@@ -16,7 +16,15 @@ from typing import Any
 
 import pytest
 
-from docql import JOB_STATUS_QUEUED, JOB_STATUS_SUCCEEDED, DocQL, DocQLError, Job, QueryResult
+from docql import (
+    JOB_STATUS_CANCELLED,
+    JOB_STATUS_QUEUED,
+    JOB_STATUS_SUCCEEDED,
+    DocQL,
+    DocQLError,
+    Job,
+    QueryResult,
+)
 
 pytestmark = pytest.mark.contract
 
@@ -30,11 +38,7 @@ RUN = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in rang
 assert re.fullmatch(r"[A-Za-z0-9]{8}", RUN)
 
 WAIT_CASES: list[dict[str, Any]] = [
-    c
-    for c in KIT["cases"]
-    if c["target"] == "stub"
-    and c["via"] == "wait"
-    and not any(step["op"] == "cancel" for step in c["steps"])
+    c for c in KIT["cases"] if c["target"] == "stub" and c["via"] == "wait"
 ]
 
 
@@ -57,7 +61,7 @@ def test_every_job_case_uses_a_known_via() -> None:
 
 
 def test_wait_cases_are_selected() -> None:
-    assert [c["id"] for c in WAIT_CASES] == ["wait-succeeded", "wait-failed"]
+    assert [c["id"] for c in WAIT_CASES] == ["wait-succeeded", "wait-failed", "wait-cancelled"]
 
 
 @pytest.mark.parametrize("case", WAIT_CASES, ids=[c["id"] for c in WAIT_CASES])
@@ -79,6 +83,13 @@ def test_wait_case(case: dict[str, Any], stub_url: str) -> None:
             assert job.job_id
             assert job.idempotency_key
             jobs[step["as"]] = job
+        elif op == "cancel":
+            # The kit expects 202 (cancel accepted on a queued job): the Job answered is cancelled.
+            assert step["expect"]["status"] == 202
+            job_id = jobs[step["job"]].job_id
+            cancelled = client.cancel_job(job_id)
+            assert cancelled.job_id == job_id
+            assert cancelled.status == JOB_STATUS_CANCELLED
         elif op == "wait":
             job_id = jobs[step["job"]].job_id
             expect = step["expect"]
@@ -89,6 +100,11 @@ def test_wait_case(case: dict[str, Any], stub_url: str) -> None:
                 assert err.reason == expect["reason"]
                 assert err.job_id == job_id
                 assert err.retryable is False
+            elif expect["outcome"] == "cancelled":
+                done = client.wait(job_id)
+                assert done.job_id == job_id
+                assert done.status == JOB_STATUS_CANCELLED
+                assert done.result is None
             else:
                 assert expect["outcome"] == "succeeded"
                 done = client.wait(job_id)
