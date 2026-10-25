@@ -54,7 +54,6 @@ jobs:
       contents: read
       packages: read
     uses: ./.github/workflows/contract.yml
-    secrets: inherit
 
   build:
     needs: [classify, ci, contract]
