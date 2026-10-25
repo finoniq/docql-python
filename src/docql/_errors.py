@@ -1,9 +1,10 @@
 """Exception tree for the DocQL client (D-09/D-11/D-12).
 
 DocQLException(Exception)
-├── DocQLError                # the server answered non-2xx
+├── DocQLError                # the server answered non-2xx, or a job failed
 └── DocQLConnectionError      # no response: connect, TLS, reset, early RST
     └── DocQLTimeoutError
+        └── DocQLWaitTimeoutError   # wait() ran out of time; the job was not cancelled
 """
 
 from collections.abc import Callable
@@ -29,6 +30,11 @@ class DocQLError(DocQLException):
     Neither :func:`str` nor :func:`repr` ever contains anything beyond the
     stored fields, and ``body`` is scrubbed by the decoder before it is
     stored, so no form leaks the API key.
+
+    ``job_id`` is set on errors from the job methods (a failed job, a poll or
+    cancel error). ``idempotency_key`` is set on errors from
+    ``submit_document`` so the caller can retry with the same key; it is a
+    field only and never appears in :func:`str` or :func:`repr` (D-08).
     """
 
     def __init__(
@@ -41,6 +47,8 @@ class DocQLError(DocQLException):
         retryable: bool,
         message: str | None,
         body: str,
+        job_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> None:
         super().__init__()
         self.status = status
@@ -50,6 +58,8 @@ class DocQLError(DocQLException):
         self.retryable = retryable
         self.message = message
         self.body = body
+        self.job_id = job_id
+        self.idempotency_key = idempotency_key
 
     def __str__(self) -> str:
         if self.reason is not None:
@@ -61,12 +71,19 @@ class DocQLError(DocQLException):
                 extras.append(f"request_id={self.request_id}")
             if self.retry_after is not None:
                 extras.append(f"retry_after={self.retry_after}s")
+            if self.job_id is not None:
+                extras.append(f"job_id={self.job_id}")
             if extras:
                 text = f"{text} ({', '.join(extras)})"
             return text
         text = f"{self.status} (non-DocQL response): {_snippet(self.body)}"
+        tail = []
         if self.request_id is not None:
-            text = f"{text} (request_id={self.request_id})"
+            tail.append(f"request_id={self.request_id}")
+        if self.job_id is not None:
+            tail.append(f"job_id={self.job_id}")
+        if tail:
+            text = f"{text} ({', '.join(tail)})"
         return text
 
     def __repr__(self) -> str:
@@ -87,6 +104,8 @@ class DocQLError(DocQLException):
                 "retryable": self.retryable,
                 "message": self.message,
                 "body": self.body,
+                "job_id": self.job_id,
+                "idempotency_key": self.idempotency_key,
             },
         )
 
@@ -96,11 +115,41 @@ def _rebuild_docql_error(fields: dict[str, Any]) -> DocQLError:
 
 
 class DocQLConnectionError(DocQLException):
-    """No DocQL response arrived: connect, TLS, reset or early connection close."""
+    """No DocQL response arrived: connect, TLS, reset or early connection close.
 
-    def __init__(self, message: str) -> None:
+    ``idempotency_key`` is set when the failed request was a
+    ``submit_document`` call, so the caller can retry it with the same key
+    (D-08). It never appears in the message.
+    """
+
+    def __init__(self, message: str, *, idempotency_key: str | None = None) -> None:
         super().__init__(message)
+        self.idempotency_key = idempotency_key
 
 
 class DocQLTimeoutError(DocQLConnectionError):
     """The DocQL request timed out. The call may still have been billed."""
+
+
+class DocQLWaitTimeoutError(DocQLTimeoutError):
+    """``wait()`` ran out of time before the job finished (OD-5).
+
+    The job was not cancelled: it may still finish, and ``get_job(job_id)``
+    or another ``wait(job_id)`` picks it up again.
+    """
+
+    def __init__(self, *, job_id: str, timeout: float) -> None:
+        super().__init__(
+            f"wait for job {job_id} timed out after {timeout:g} s; the job was not cancelled"
+        )
+        self.job_id = job_id
+        self.timeout = timeout
+
+    def __reduce__(
+        self,
+    ) -> tuple[Callable[[str, float], "DocQLWaitTimeoutError"], tuple[str, float]]:
+        return _rebuild_wait_timeout, (self.job_id, self.timeout)
+
+
+def _rebuild_wait_timeout(job_id: str, timeout: float) -> DocQLWaitTimeoutError:
+    return DocQLWaitTimeoutError(job_id=job_id, timeout=timeout)

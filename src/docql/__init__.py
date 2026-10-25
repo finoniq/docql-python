@@ -2,6 +2,11 @@
 
 from docql._client import DocQL
 from docql._constants import (
+    JOB_STATUS_CANCELLED,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_QUEUED,
+    JOB_STATUS_RUNNING,
+    JOB_STATUS_SUCCEEDED,
     MODE_FAST,
     MODE_STANDARD,
     REASON_BODY_NOT_JSON,
@@ -33,7 +38,9 @@ from docql._errors import (
     DocQLError,
     DocQLException,
     DocQLTimeoutError,
+    DocQLWaitTimeoutError,
 )
+from docql._jobs import Job
 from docql._response import QueryResult
 from docql._version import __version__
 
@@ -43,6 +50,13 @@ __all__ = [
     "DocQLError",
     "DocQLException",
     "DocQLTimeoutError",
+    "DocQLWaitTimeoutError",
+    "JOB_STATUS_CANCELLED",
+    "JOB_STATUS_FAILED",
+    "JOB_STATUS_QUEUED",
+    "JOB_STATUS_RUNNING",
+    "JOB_STATUS_SUCCEEDED",
+    "Job",
     "MODE_FAST",
     "MODE_STANDARD",
     "Mode",

@@ -11,13 +11,24 @@ from docql._constants import (
     CONNECT_TIMEOUT,
     DEFAULT_API_URL,
     DEFAULT_TIMEOUT,
+    DEFAULT_WAIT_TIMEOUT,
     ENV_API_KEY,
     ENV_API_URL,
     ERROR_BODY_READ_LIMIT,
+    JOBS_PATH,
     MAX_UPLOAD_BYTES,
     QUERY_PATH,
 )
 from docql._errors import DocQLConnectionError, DocQLTimeoutError
+from docql._jobs import (
+    Job,
+    _send_once,
+    fetch_job,
+    new_idempotency_key,
+    parse_job,
+    validate_idempotency_key,
+    wait_for,
+)
 from docql._request import Upload, _ShortReadError, prepare_upload
 from docql._response import QueryResult, decode_error, parse_result
 from docql._version import __version__
@@ -53,6 +64,11 @@ class DocQL:
     production default. The key travels on each request, never as a client
     default, and redirects are never followed, so it cannot leave the
     configured host.
+
+    ``query_document`` is one request that is never retried (calls are paid).
+    The job methods (``submit_document``, ``get_job``, ``wait``,
+    ``cancel_job``) are the async alternative: ``wait`` is the only one that
+    repeats requests, and only GETs.
     """
 
     def __init__(
@@ -134,7 +150,8 @@ class DocQL:
 
         ``file`` is a path (``str`` or ``os.PathLike``), raw ``bytes``, or a
         binary file object read from its current position and never closed
-        (D-13/D-16).
+        (D-13/D-16). This is exactly one request and it is never retried; for
+        long documents use ``submit_document`` and ``wait``.
         """
         with prepare_upload(
             file, query=query, prompt=prompt, mode=mode, filename=filename
@@ -192,6 +209,76 @@ class DocQL:
             if 200 <= response.status_code < 300:
                 return parse_result(response.status_code, response.headers, body, self._api_key)
             raise decode_error(response.status_code, response.headers, body, self._api_key)
+
+    def submit_document(
+        self,
+        file: str | os.PathLike[str] | bytes | BinaryIO,
+        *,
+        query: str | None = None,
+        prompt: str | None = None,
+        mode: str | None = None,
+        filename: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> Job:
+        """Submit one document as an async job and answer the queued Job (JSDK-01).
+
+        The upload is built exactly as ``query_document`` builds it. Every
+        submit carries one ``Idempotency-Key``: ``idempotency_key`` when given
+        (1-255 printable ASCII characters, else ValueError before any I/O),
+        else a fresh random key. The key is on the returned Job and on every
+        error this call raises, so a caller can safely retry with it; a failed
+        job needs a new key, because the old one replays the failure for 24 h.
+        """
+        key = (
+            validate_idempotency_key(idempotency_key)
+            if idempotency_key is not None
+            else new_idempotency_key()
+        )
+        with prepare_upload(
+            file, query=query, prompt=prompt, mode=mode, filename=filename
+        ) as upload:
+            status, headers, body = _send_once(
+                self,
+                "POST",
+                JOBS_PATH,
+                upload=upload,
+                idempotency_keys=(key,),
+                timeout=self._timeout,
+            )
+        if 200 <= status < 300:
+            return parse_job(status, headers, body, self._api_key, idempotency_key=key)
+        error = decode_error(status, headers, body, self._api_key)
+        error.idempotency_key = key
+        raise error
+
+    def get_job(self, job_id: str) -> Job:
+        """Fetch the job once and answer it (T-E2).
+
+        A failed job is answered with ``.error`` set, not raised. A non-2xx
+        answer (``job_not_found``, ``job_expired``, a 503, ...) raises
+        :class:`DocQLError` with ``job_id`` set. Exactly one request, never
+        retried.
+        """
+        return fetch_job(self, job_id)
+
+    def wait(
+        self,
+        job_id: str,
+        *,
+        timeout: float = DEFAULT_WAIT_TIMEOUT,
+        poll_interval: float | None = None,
+    ) -> Job:
+        """Poll the job until it finishes and answer it (JSDK-01, D-03..D-05, OD-5).
+
+        A succeeded or cancelled job is answered (check ``status``); a failed
+        job raises its :class:`DocQLError` with ``job_id`` set. Each sleep is
+        the server's ``Retry-After`` clamped to [1, 30] s, raised to
+        ``poll_interval`` when that is longer. Network errors, 429 and 503 are
+        retried; any other error raises at once. After ``timeout`` seconds
+        (default 900) it raises :class:`DocQLWaitTimeoutError`; the job is
+        never cancelled.
+        """
+        return wait_for(self, job_id, timeout=timeout, poll_interval=poll_interval)
 
     def close(self) -> None:
         """Close the httpx client the SDK created; an injected one stays open (D-06)."""

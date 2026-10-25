@@ -62,3 +62,29 @@ REASON_QUEUE_FULL: Final[str] = "queue_full"
 REASON_IDEMPOTENCY_KEY_CONFLICT: Final[str] = "idempotency_key_conflict"
 REASON_IDEMPOTENCY_IN_PROGRESS: Final[str] = "idempotency_in_progress"
 REASON_JOB_INTERRUPTED: Final[str] = "job_interrupted"
+
+# Async jobs (JSDK-01). Status values are open strings (D-09): an unknown status
+# from a future DocQL release is kept verbatim on Job.status, never an error.
+JOBS_PATH: Final[str] = "/v1/jobs"
+JOB_STATUS_QUEUED: Final[str] = "queued"
+JOB_STATUS_RUNNING: Final[str] = "running"
+JOB_STATUS_SUCCEEDED: Final[str] = "succeeded"
+JOB_STATUS_FAILED: Final[str] = "failed"
+JOB_STATUS_CANCELLED: Final[str] = "cancelled"
+
+# One poll (get_job, cancel_job, each wait() poll): 30 s read, 10 s connect, never
+# the 660 s upload timeout (research Pitfall 3). wait() also caps it by the time left.
+POLL_READ_TIMEOUT: Final[float] = 30.0
+
+# OD-5: wait() gives up after 15 minutes by default (540 s standard budget plus
+# queue time) and never cancels the job.
+DEFAULT_WAIT_TIMEOUT: Final[float] = 900.0
+
+# Wait pacing, matching the kit's reference waitForJob (research F6, D-03): each
+# Retry-After is clamped to [1, 30] s; a 200 without one sleeps 1 s.
+RETRY_AFTER_FLOOR: Final[int] = 1
+RETRY_AFTER_CAP: Final[int] = 30
+RETRY_AFTER_ABSENT: Final[int] = 1
+
+# Transient poll failures without Retry-After back off 1, 2, 4, 8, 16, 30 s (D-04).
+TRANSIENT_BACKOFF_CAP: Final[int] = 30
