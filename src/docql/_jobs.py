@@ -14,8 +14,8 @@ requests and reaches the same outcome on the kit's ``waitCases``:
 * D-05: ``succeeded`` and ``cancelled`` return the Job; ``failed`` raises the
   job's :class:`DocQLError` (``job_id`` set, ``retryable`` False).
 * OD-5: the wait gives up when the next sleep would pass the deadline (900 s by
-  default) and raises :class:`DocQLWaitTimeoutError`. Nothing in the wait ever
-  sends DELETE: cancelling is only the caller's explicit ``cancel_job()``.
+  default) and raises :class:`DocQLWaitTimeoutError`. The wait never cancels the
+  job, on any path: cancelling is only the caller's explicit ``cancel_job()``.
 
 This module does not touch ``query_document``: its send block is copied, not
 shared, so the v0.1 request path stays byte-identical (research Pitfall 12).
