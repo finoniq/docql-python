@@ -23,6 +23,7 @@ from docql._errors import DocQLConnectionError, DocQLTimeoutError
 from docql._jobs import (
     Job,
     _send_once,
+    cancel,
     fetch_job,
     new_idempotency_key,
     parse_job,
@@ -279,6 +280,16 @@ class DocQL:
         never cancelled.
         """
         return wait_for(self, job_id, timeout=timeout, poll_interval=poll_interval)
+
+    def cancel_job(self, job_id: str) -> Job:
+        """Ask DocQL to cancel the job and answer the Job at answer time (OD-10).
+
+        A queued or running job may still be ``running`` in the answer; poll to
+        confirm (``get_job`` or ``wait``). A job that was already finished is
+        answered unchanged. A non-2xx answer raises :class:`DocQLError` with
+        ``job_id`` set. Exactly one request, never retried.
+        """
+        return cancel(self, job_id)
 
     def close(self) -> None:
         """Close the httpx client the SDK created; an injected one stays open (D-06)."""

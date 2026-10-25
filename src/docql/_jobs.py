@@ -313,6 +313,22 @@ def fetch_job(client: DocQL, job_id: str) -> Job:
     raise _job_error(status, headers, body, client._api_key, job_id)
 
 
+def cancel(client: DocQL, job_id: str) -> Job:
+    """One DELETE of the job (OD-10): the Job as answered, else DocQLError with job_id.
+
+    A 202 answers the job as it is right after the cancel request; a 200 answers
+    a job that was already terminal. This is the only DELETE in the SDK, and only
+    the caller's explicit ``cancel_job()`` reaches it.
+    """
+    path = job_path(job_id)
+    status, headers, body = _send_once(
+        client, "DELETE", path, timeout=httpx.Timeout(POLL_READ_TIMEOUT, connect=CONNECT_TIMEOUT)
+    )
+    if 200 <= status < 300:
+        return parse_job(status, headers, body, client._api_key)
+    raise _job_error(status, headers, body, client._api_key, job_id)
+
+
 def wait_for(client: DocQL, job_id: str, *, timeout: float, poll_interval: float | None) -> Job:
     """Poll the job until it is succeeded or cancelled; the kit's waitForJob (module docstring)."""
     path = job_path(job_id)

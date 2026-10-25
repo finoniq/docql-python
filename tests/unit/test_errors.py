@@ -120,4 +120,4 @@ def test_wait_timeout_error() -> None:
     assert type(restored) is DocQLWaitTimeoutError
     assert (restored.job_id, restored.timeout, str(restored)) == (err.job_id, 900.0, str(err))
     with pytest.raises(TypeError):
-        DocQLWaitTimeoutError("job_abc", 900.0)  # type: ignore[misc]
+        DocQLWaitTimeoutError("job_abc", 900.0)  # type: ignore[call-arg]
