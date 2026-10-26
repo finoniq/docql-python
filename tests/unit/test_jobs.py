@@ -256,3 +256,67 @@ def test_job_repr_never_shows_the_key_or_the_result() -> None:
     assert isinstance(job, Job)
     done = client_for(Recorder(kit_answer("job-200-succeeded"))).get_job(JOB_ID)
     assert "result=" not in repr(done)
+
+
+# --- every DocQLError from a job-id method carries the caller's job id (WR-02) -----------
+# Go (jobAnswer/withJobID) and Java (jobOrThrow/withJob) set it on an unusable 2xx and on a
+# failed job without an error object too; code that resumes or logs by err.job_id needs it.
+
+
+def test_get_job_unusable_2xx_carries_the_job_id() -> None:
+    client = client_for(Recorder(answer(200, b"<html>"), kit_answer("job-404-not-found")))
+    with pytest.raises(DocQLError) as unusable:
+        client.get_job("j1")
+    assert unusable.value.status == 200
+    assert unusable.value.job_id == "j1"
+    # The non-2xx answer from the same method names the same job.
+    with pytest.raises(DocQLError) as not_found:
+        client.get_job("j1")
+    assert not_found.value.status == 404
+    assert not_found.value.job_id == unusable.value.job_id
+
+
+def test_cancel_job_unusable_2xx_carries_the_job_id() -> None:
+    recorder = Recorder(answer(202, {"status": "running", "metadata": {}}))
+    with pytest.raises(DocQLError) as excinfo:
+        client_for(recorder).cancel_job("j1")
+    assert excinfo.value.status == 202
+    assert excinfo.value.job_id == "j1"
+    assert [r.method for r in recorder.requests] == ["DELETE"]
+
+
+def test_wait_unusable_2xx_carries_the_job_id() -> None:
+    recorder = Recorder(answer(200, b"not json"))
+    with pytest.raises(DocQLError) as excinfo:
+        client_for(recorder).wait("j1")
+    assert excinfo.value.status == 200
+    assert excinfo.value.job_id == "j1"
+    assert len(recorder.requests) == 1
+
+
+def test_wait_failed_job_without_error_object_carries_the_job_id() -> None:
+    recorder = Recorder(answer(200, {"job_id": "j1", "status": "failed"}))
+    with pytest.raises(DocQLError) as excinfo:
+        client_for(recorder).wait("j1")
+    assert excinfo.value.job_id == "j1"
+    assert excinfo.value.retryable is False
+    assert len(recorder.requests) == 1
+
+
+def test_get_job_succeeded_with_unusable_result_carries_the_job_id() -> None:
+    recorder = Recorder(
+        answer(200, {"job_id": "j1", "status": "succeeded", "result": {"data": [1]}})
+    )
+    with pytest.raises(DocQLError) as excinfo:
+        client_for(recorder).get_job("j1")
+    assert excinfo.value.job_id == "j1"
+
+
+def test_get_job_twice_on_an_unusable_answer_carries_the_job_id_both_times() -> None:
+    client = client_for(Recorder(answer(200, b"[]")))
+    ids = []
+    for _ in range(2):
+        with pytest.raises(DocQLError) as excinfo:
+            client.get_job("j1")
+        ids.append(excinfo.value.job_id)
+    assert ids == ["j1", "j1"]
