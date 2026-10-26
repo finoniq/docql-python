@@ -8,6 +8,7 @@ import io
 import json
 import os
 import string
+import traceback
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -598,3 +599,95 @@ def test_resubmitting_with_the_key_from_a_reread_error_sends_that_key(
     job = submit(recorder, str(path), filename=None, idempotency_key=key)
     assert keys_sent(recorder) == [[key]]
     assert job.idempotency_key == key
+
+
+# --- an interrupt after the first request (WR-01, D-08) ---------------------------------
+# Ctrl-C keeps its type (except KeyboardInterrupt handlers and the interpreter's exit still
+# work), carries the sent key as its idempotency_key attribute, and gains one note that
+# names that attribute but never prints the key.
+
+
+def interrupt(*_args: object) -> None:
+    raise KeyboardInterrupt
+
+
+def test_an_interrupt_during_the_retry_sleep_keeps_its_type_and_carries_the_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_jobs, "_sleep", interrupt)
+    recorder = Recorder(UNAVAILABLE, QUEUED)
+    with pytest.raises(KeyboardInterrupt) as excinfo:
+        submit(recorder)
+    key = keys_sent(recorder)[0][0]
+    assert type(excinfo.value) is KeyboardInterrupt
+    assert len(key) == 43
+    assert getattr(excinfo.value, "idempotency_key", None) == key
+    # Interrupted in the sleep: nothing more is sent.
+    assert len(recorder.requests) == 1
+
+
+@pytest.mark.parametrize("raised", [KeyboardInterrupt, SystemExit, RuntimeError])
+def test_an_interrupt_during_the_first_send_carries_the_key(
+    sleeps: list[float], raised: type[BaseException]
+) -> None:
+    def answer(_request: httpx.Request) -> httpx.Response:
+        raise raised
+
+    recorder = Recorder(answer, QUEUED)
+    with pytest.raises(raised) as excinfo:
+        submit(recorder, idempotency_key="order-14")
+    assert type(excinfo.value) is raised
+    assert getattr(excinfo.value, "idempotency_key", None) == "order-14"
+    assert len(recorder.requests) == 1
+    assert sleeps == []
+
+
+def test_an_interrupt_during_a_later_retry_sleep_carries_the_same_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    slept: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        if len(slept) == 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(_jobs, "_sleep", sleep)
+    recorder = Recorder(UNAVAILABLE)
+    with pytest.raises(KeyboardInterrupt) as excinfo:
+        submit(recorder)
+    key = keys_sent(recorder)[0][0]
+    assert keys_sent(recorder) == [[key], [key]]
+    assert getattr(excinfo.value, "idempotency_key", None) == key
+    assert slept == [5, 5]
+
+
+def test_the_interrupt_note_never_contains_the_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_jobs, "_sleep", interrupt)
+    recorder = Recorder(UNAVAILABLE, QUEUED)
+    with pytest.raises(KeyboardInterrupt) as excinfo:
+        submit(recorder, idempotency_key="secret-interrupt-key")
+    notes = getattr(excinfo.value, "__notes__", [])
+    assert len(notes) == 1
+    assert "idempotency_key" in notes[0]
+    assert "secret-interrupt-key" not in notes[0]
+    printed = "".join(traceback.format_exception(excinfo.value))
+    assert "idempotency_key" in printed
+    assert "secret-interrupt-key" not in printed
+    assert "secret-interrupt-key" not in repr(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        UNAVAILABLE,
+        envelope(409, "idempotency_key_conflict"),
+        envelope(429, "rate_limit_exceeded", {"Retry-After": "1"}),
+    ],
+    ids=["503-four-times", "409-conflict", "429"],
+)
+def test_docql_errors_from_submit_get_no_note(sleeps: list[float], answer: Answer) -> None:
+    with pytest.raises(DocQLError) as excinfo:
+        submit(Recorder(answer), idempotency_key="order-15")
+    assert not hasattr(excinfo.value, "__notes__")
+    assert excinfo.value.idempotency_key == "order-15"
