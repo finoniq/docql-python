@@ -5,6 +5,22 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-10-26
+
+### Fixed
+
+- WR-01: after a submit 503, a failure to re-read the input for the same-key
+  retry (a moved or deleted path, a failing seek, a closed stream, a read
+  error) now raises `DocQLConnectionError` carrying `idempotency_key`, so you
+  can resubmit with that key instead of creating a second job. An interrupt
+  such as Ctrl-C during the retry keeps its type and carries the key as its
+  `idempotency_key` attribute; the key is never printed
+- WR-02: `get_job`, `cancel_job` and `wait` set `job_id` on every `DocQLError`
+  they raise, including an unusable 2xx answer and a failed job without an
+  error object
+
+No breaking changes: code written against 0.2.0 runs unchanged.
+
 ## [0.2.0] - 2026-10-26
 
 ### Added
@@ -71,5 +87,6 @@ No breaking changes: code written against 0.1.0 runs unchanged.
   reason constants
 - Typed package (`py.typed`)
 
+[0.2.1]: https://github.com/finoniq/docql-python/tree/v0.2.1
 [0.2.0]: https://github.com/finoniq/docql-python/tree/v0.2.0
 [0.1.0]: https://github.com/finoniq/docql-python/tree/v0.1.0
