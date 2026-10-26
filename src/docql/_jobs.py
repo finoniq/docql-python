@@ -61,6 +61,7 @@ from docql._constants import (
 from docql._errors import (
     DocQLConnectionError,
     DocQLError,
+    DocQLException,
     DocQLTimeoutError,
     DocQLWaitTimeoutError,
 )
@@ -94,6 +95,13 @@ _monotonic = time.monotonic
 _INTERNAL_MODULE_ROOTS = ("h11", "httpcore")
 
 _IDEMPOTENCY_KEY_ERROR = "idempotency_key must be 1-255 printable ASCII characters (0x20-0x7E)"
+
+# The DocQLConnectionError a same-key submit retry raises when the body cannot be
+# rebuilt (WR-01, D-08). It never names the key: the key is a field only.
+_REREAD_ERROR = (
+    "could not re-read the document for the same-key submit retry; "
+    "the job may exist, so retry with this error's idempotency_key"
+)
 
 
 @dataclass(frozen=True)
@@ -374,6 +382,12 @@ def submit_with_retry(
     Every error raised here carries ``idempotency_key`` so the caller can retry
     safely with it. Go (``SubmitDocument``) and Java (``submitDocument``) copy
     this loop: same cap, same backoff, same retryable set.
+
+    Once the first request has gone out a job may exist, so on attempts 2-4 any
+    failure to rewind, re-open, re-read or re-send the input is raised as
+    :class:`DocQLConnectionError` with the key, chained from the original, and
+    nothing more is sent (Go's ``*ConnectionError``, Java's
+    ``DocQLConnectionException``). Before the first request nothing is wrapped.
     """
     key = (
         validate_idempotency_key(idempotency_key)
@@ -389,19 +403,26 @@ def submit_with_retry(
     attempt = 0
     while True:
         attempt += 1
-        if attempt > 1 and stream is not None:
-            stream.seek(start)
-        with prepare_upload(
-            file, query=query, prompt=prompt, mode=mode, filename=filename
-        ) as upload:
-            status, headers, body = _send_once(
-                client,
-                "POST",
-                JOBS_PATH,
-                upload=upload,
-                idempotency_keys=(key,),
-                timeout=client._timeout,
-            )
+        try:
+            if attempt > 1 and stream is not None:
+                stream.seek(start)
+            with prepare_upload(
+                file, query=query, prompt=prompt, mode=mode, filename=filename
+            ) as upload:
+                status, headers, body = _send_once(
+                    client,
+                    "POST",
+                    JOBS_PATH,
+                    upload=upload,
+                    idempotency_keys=(key,),
+                    timeout=client._timeout,
+                )
+        except Exception as exc:
+            if attempt == 1 or isinstance(exc, DocQLException):
+                raise
+            # A job may exist from an earlier attempt: never send a partial or
+            # different body under this key, and never lose the key.
+            raise DocQLConnectionError(_REREAD_ERROR, idempotency_key=key) from exc
         if 200 <= status < 300:
             try:
                 return parse_job(status, headers, body, client._api_key, idempotency_key=key)
