@@ -5,7 +5,8 @@
 # anything builds: shape, pyproject/CHANGELOG agreement, the exact version not
 # yet on its index (D-19), and — for a final tag — an rc tag on the same commit.
 # Every upload is then verified from a clean venv: install from the index and
-# the README quickstart against the digest-pinned stub; the PyPI release also
+# run the README quickstart and jobs example against the digest-pinned stub
+# (D-14); the PyPI release also
 # proves provenance and attestations (D-20).
 name: release
 
@@ -169,6 +170,10 @@ jobs:
         run: |
           set -euo pipefail
           scripts/stub-up.sh --run "$RUNNER_TEMP/v/bin/python" scripts/run_readme.py --expect-version "$VERSION"
+      - name: README jobs example against the pinned stub
+        run: |
+          set -euo pipefail
+          scripts/stub-up.sh --run "$RUNNER_TEMP/v/bin/python" scripts/run_readme.py --block jobs --expect-version "$VERSION"
 
   publish-pypi:
     name: publish-pypi
@@ -231,6 +236,10 @@ jobs:
         run: |
           set -euo pipefail
           scripts/stub-up.sh --run "$RUNNER_TEMP/v/bin/python" scripts/run_readme.py --expect-version "$VERSION"
+      - name: README jobs example against the pinned stub
+        run: |
+          set -euo pipefail
+          scripts/stub-up.sh --run "$RUNNER_TEMP/v/bin/python" scripts/run_readme.py --block jobs --expect-version "$VERSION"
       - name: provenance and attestations
         run: |
           set -euo pipefail
