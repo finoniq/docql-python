@@ -31,6 +31,45 @@ with DocQL() as client:  # reads DOCQL_API_KEY and DOCQL_API_URL
 The query uses DocQL's brace-and-field syntax; pass `prompt=` instead for a
 natural-language instruction. A call takes exactly one of `query` or `prompt`.
 
+## Long documents: jobs
+
+Use a job for a long document: a proxied edge cuts a single call at about
+100–120 s, while `mode=standard` may take up to 540 s. `submit_document` uploads
+the file and answers at once with a queued job, and `wait` polls it until it
+finishes.
+
+<!-- docql:jobs:start -->
+```python
+from docql import DocQL
+
+with DocQL() as client:  # reads DOCQL_API_KEY and DOCQL_API_URL
+    job = client.submit_document("invoice.pdf", query="{ invoice_number total_amount }")
+    job = client.wait(job.job_id)  # polls until succeeded or cancelled
+    print(job.status)
+    if job.result is not None:
+        print(job.result.data)
+```
+<!-- docql:jobs:end -->
+
+- `get_job(job_id)` makes one poll and answers the job as it is; a `failed` job
+  is answered too (read `job.error`), never raised.
+- `cancel_job(job_id)` asks DocQL to cancel and answers the job at that moment,
+  which may still be `running`: poll to confirm.
+- `wait` answers a `succeeded` or `cancelled` job and raises the job's
+  `DocQLError` for a `failed` one. It gives up after 15 minutes by default
+  (`timeout=` in seconds) with `DocQLWaitTimeoutError`, and never sends a poll
+  at or past that deadline. It never cancels the job: `get_job` or another
+  `wait` picks it up again.
+- Every submit carries an `Idempotency-Key`, generated for you unless you pass
+  `idempotency_key=`; it is on the returned job and on every error the submit
+  raises. DocQL scopes the key to your organisation. Unlike `query_document`,
+  `submit_document` retries a 503 with the same key (a 503 may mean the job was
+  created anyway), but only for a path, `bytes` or a seekable file. A job that
+  ended `failed`, `job_interrupted` included, needs a new key: the old one
+  replays the failure.
+- `job.pages_done` stays 0 while DocQL runs OCR, so show progress as
+  indeterminate while a running job reports 0 pages done.
+
 ## Configuration
 
 | Keyword | Env variable | Default | Notes |
@@ -115,7 +154,7 @@ text, truncated to about 2 KB). Every reason below is also exported as a
 
 ## Retrying
 
-The SDK never retries — every call is billed. Retry yourself, only on
+`query_document` never retries — every call is billed. Retry it yourself, only on
 `retryable` errors, sleeping `retry_after` when the server sent one and a
 capped exponential backoff otherwise:
 

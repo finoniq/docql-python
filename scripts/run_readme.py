@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Run the README quickstart against the pinned stub (SC4).
+"""Run a README example against the pinned stub (SC4, PY-06).
 
-Extracts the single fenced Python block between the ``docql:quickstart``
-markers, writes ``invoice.pdf`` from the golden contract kit into a fresh
-temporary directory, and runs the block there with the interpreter that runs
-this script. Stdlib only, so a clean release venv can run it unchanged.
+Extracts the single fenced Python block between the ``docql:<block>`` markers
+(``--block quickstart``, the default, or ``--block jobs``), writes
+``invoice.pdf`` from the golden contract kit into a fresh temporary directory,
+and runs the block there with the interpreter that runs this script. Stdlib
+only, so a clean release venv can run it unchanged.
 """
 
 import argparse
@@ -19,22 +20,23 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-START_MARKER = "<!-- docql:quickstart:start -->"
-END_MARKER = "<!-- docql:quickstart:end -->"
+BLOCKS = ("quickstart", "jobs")
 FENCED_BLOCK = re.compile(r"```([^\n`]*)\n(.*?)```", re.DOTALL)
 VERSION_PROBE = "import importlib.metadata; print(importlib.metadata.version('docql'))"
 RUN_TIMEOUT_SECONDS = 120
 
 
-def extract_quickstart(readme_text: str) -> str | None:
-    """The one fenced python block between the markers, or None when unusable."""
-    if readme_text.count(START_MARKER) != 1 or readme_text.count(END_MARKER) != 1:
+def extract_block(readme_text: str, name: str) -> str | None:
+    """The one fenced python block between the ``name`` markers, or None when unusable."""
+    start_marker = f"<!-- docql:{name}:start -->"
+    end_marker = f"<!-- docql:{name}:end -->"
+    if readme_text.count(start_marker) != 1 or readme_text.count(end_marker) != 1:
         return None
-    start = readme_text.find(START_MARKER)
-    end = readme_text.find(END_MARKER)
+    start = readme_text.find(start_marker)
+    end = readme_text.find(end_marker)
     if start == -1 or end == -1 or start > end:
         return None
-    blocks = FENCED_BLOCK.findall(readme_text[start + len(START_MARKER) : end])
+    blocks = FENCED_BLOCK.findall(readme_text[start + len(start_marker) : end])
     if len(blocks) != 1:
         return None
     block: tuple[str, str] = blocks[0]
@@ -45,7 +47,7 @@ def extract_quickstart(readme_text: str) -> str | None:
 
 
 def run_child(
-    command: list[str], cwd: Path, env: dict[str, str]
+    command: list[str], cwd: Path, env: dict[str, str], tag: str
 ) -> subprocess.CompletedProcess[str]:
     """Run a child interpreter; a timeout ends this script with exit 1."""
     try:
@@ -59,17 +61,20 @@ def run_child(
             check=False,
         )
     except subprocess.TimeoutExpired:
-        print(f"README_QUICKSTART_TIMEOUT after {RUN_TIMEOUT_SECONDS}s", file=sys.stderr)
+        print(f"{tag}_TIMEOUT after {RUN_TIMEOUT_SECONDS}s", file=sys.stderr)
         raise SystemExit(1) from None
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Execute the README quickstart.")
+    parser = argparse.ArgumentParser(description="Execute a README example.")
     parser.add_argument("--readme", type=Path, default=ROOT / "README.md")
     parser.add_argument("--expect-version")
+    parser.add_argument("--block", choices=BLOCKS, default="quickstart")
     args = parser.parse_args()
     readme: Path = args.readme
     expect_version: str | None = args.expect_version
+    block: str = args.block
+    tag = f"README_{block.upper()}"
 
     stub_url = os.environ.get("DOCQL_STUB_URL", "").rstrip("/")
     if not stub_url:
@@ -78,9 +83,9 @@ def main() -> int:
         )
         return 1
 
-    code = extract_quickstart(readme.read_text(encoding="utf-8"))
+    code = extract_block(readme.read_text(encoding="utf-8"), block)
     if code is None:
-        print("README_QUICKSTART_MISSING")
+        print(f"{tag}_MISSING")
         return 1
 
     kit: dict[str, Any] = json.loads((ROOT / "contract" / "sdk-cases.json").read_bytes())
@@ -94,16 +99,16 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
         (work / "invoice.pdf").write_bytes(base64.b64decode(file_base64))
-        (work / "quickstart.py").write_text(code, encoding="utf-8")
+        (work / f"{block}.py").write_text(code, encoding="utf-8")
         if expect_version is not None:
-            probe = run_child([sys.executable, "-I", "-c", VERSION_PROBE], work, env)
+            probe = run_child([sys.executable, "-I", "-c", VERSION_PROBE], work, env, tag)
             installed = probe.stdout.strip()
             if probe.returncode != 0 or installed != expect_version:
                 sys.stderr.write(probe.stderr)
-                print(f"README_QUICKSTART_VERSION_MISMATCH expected {expect_version!r}")
+                print(f"{tag}_VERSION_MISMATCH expected {expect_version!r}")
                 print(f"installed version: {installed!r}")
                 return 1
-        run = run_child([sys.executable, "-I", "quickstart.py"], work, env)
+        run = run_child([sys.executable, "-I", f"{block}.py"], work, env, tag)
 
     if run.returncode != 0:
         sys.stderr.write(run.stderr)
@@ -111,7 +116,7 @@ def main() -> int:
     sys.stdout.write(run.stdout)
     if not run.stdout.endswith("\n"):
         print()
-    print("README_QUICKSTART_OK")
+    print(f"{tag}_OK")
     return 0
 
 

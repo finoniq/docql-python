@@ -77,3 +77,5 @@ jobs:
           fi
       - name: README quickstart
         run: scripts/stub-up.sh --run uv run --locked python scripts/run_readme.py
+      - name: README jobs example
+        run: scripts/stub-up.sh --run uv run --locked python scripts/run_readme.py --block jobs
