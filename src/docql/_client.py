@@ -262,8 +262,8 @@ class DocQL:
 
         A failed job is answered with ``.error`` set, not raised. A non-2xx
         answer (``job_not_found``, ``job_expired``, a 503, ...) raises
-        :class:`DocQLError` with ``job_id`` set. Exactly one request, never
-        retried.
+        :class:`DocQLError`. Every DocQLError it raises, an unusable 2xx answer
+        included, carries ``job_id``. Exactly one request, never retried.
         """
         return fetch_job(self, job_id)
 
@@ -283,7 +283,9 @@ class DocQL:
         retried; any other error raises at once. When ``timeout`` seconds
         (default 900) run out before the job finishes it raises
         :class:`DocQLWaitTimeoutError`; no poll is ever sent at or past that
-        deadline, and the job is never cancelled.
+        deadline, and the job is never cancelled. Every DocQLError it raises
+        (a failed job, an unusable answer, a non-retried error) carries
+        ``job_id``.
         """
         return wait_for(self, job_id, timeout=timeout, poll_interval=poll_interval)
 
@@ -292,8 +294,9 @@ class DocQL:
 
         A queued or running job may still be ``running`` in the answer; poll to
         confirm (``get_job`` or ``wait``). A job that was already finished is
-        answered unchanged. A non-2xx answer raises :class:`DocQLError` with
-        ``job_id`` set. Exactly one request, never retried.
+        answered unchanged. A non-2xx answer raises :class:`DocQLError`. Every
+        DocQLError it raises, an unusable 2xx answer included, carries
+        ``job_id``. Exactly one request, never retried.
         """
         return cancel(self, job_id)
 

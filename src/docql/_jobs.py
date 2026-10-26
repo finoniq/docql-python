@@ -338,6 +338,26 @@ def _job_error(
     return error
 
 
+def _job_or_raise(
+    status: int, headers: Mapping[str, str], body: bytes, api_key: str, job_id: str
+) -> Job:
+    """A job-id method's answer as a Job; every DocQLError it raises names ``job_id`` (WR-02).
+
+    A non-2xx raises :func:`_job_error`; an unusable 2xx (not a job object, or
+    a succeeded job whose result cannot be decoded) raises ``parse_job``'s
+    error with the caller's ``job_id`` set, as Go's ``withJobID`` and Java's
+    ``withJob`` do.
+    """
+    if not 200 <= status < 300:
+        raise _job_error(status, headers, body, api_key, job_id)
+    try:
+        return parse_job(status, headers, body, api_key)
+    except DocQLError as error:
+        if error.job_id is None:
+            error.job_id = job_id
+        raise
+
+
 def _carry_key(exc: BaseException, key: str) -> None:
     """Attach the sent Idempotency-Key to a non-DocQL exception leaving a submit (WR-01).
 
@@ -495,9 +515,7 @@ def fetch_job(client: DocQL, job_id: str) -> Job:
     status, headers, body = _send_once(
         client, "GET", path, timeout=httpx.Timeout(POLL_READ_TIMEOUT, connect=CONNECT_TIMEOUT)
     )
-    if 200 <= status < 300:
-        return parse_job(status, headers, body, client._api_key)
-    raise _job_error(status, headers, body, client._api_key, job_id)
+    return _job_or_raise(status, headers, body, client._api_key, job_id)
 
 
 def cancel(client: DocQL, job_id: str) -> Job:
@@ -511,9 +529,7 @@ def cancel(client: DocQL, job_id: str) -> Job:
     status, headers, body = _send_once(
         client, "DELETE", path, timeout=httpx.Timeout(POLL_READ_TIMEOUT, connect=CONNECT_TIMEOUT)
     )
-    if 200 <= status < 300:
-        return parse_job(status, headers, body, client._api_key)
-    raise _job_error(status, headers, body, client._api_key, job_id)
+    return _job_or_raise(status, headers, body, client._api_key, job_id)
 
 
 def wait_for(client: DocQL, job_id: str, *, timeout: float, poll_interval: float | None) -> Job:
@@ -539,19 +555,21 @@ def wait_for(client: DocQL, job_id: str, *, timeout: float, poll_interval: float
             server = None
         else:
             if 200 <= status < 300:
-                job = parse_job(status, headers, body, client._api_key)
+                job = _job_or_raise(status, headers, body, client._api_key, job_id)
                 if job.status in (JOB_STATUS_SUCCEEDED, JOB_STATUS_CANCELLED):
                     return job
                 if job.status == JOB_STATUS_FAILED:
                     if job.error is not None:
                         raise job.error
-                    raise _unusable_result(
+                    no_error = _unusable_result(
                         status,
                         headers,
                         body,
                         client._api_key,
                         "unexpected response: failed job without an error object",
                     )
+                    no_error.job_id = job_id
+                    raise no_error
                 # queued, running or a status this SDK does not know (D-09).
                 transient = False
                 backoff = 1
