@@ -30,6 +30,7 @@ shared, so the v0.1 request path stays byte-identical (research Pitfall 12).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import platform
@@ -101,6 +102,16 @@ _IDEMPOTENCY_KEY_ERROR = "idempotency_key must be 1-255 printable ASCII characte
 _REREAD_ERROR = (
     "could not re-read the document for the same-key submit retry; "
     "the job may exist, so retry with this error's idempotency_key"
+)
+
+# The note a non-DocQL exception (Ctrl-C, SystemExit, ...) gains when it leaves a
+# submit after its first request (WR-01). It names the attribute, never the key:
+# notes are printed in every traceback (D-08, research Pitfall 9).
+_KEY_NOTE = (
+    "docql: submit_document stopped after its first request; a job may exist. "
+    "This exception's idempotency_key attribute holds the Idempotency-Key that was "
+    "sent; resubmit with idempotency_key= set to it, or pass your own "
+    "idempotency_key= so a resubmit after a crash cannot create a second job"
 )
 
 
@@ -327,6 +338,25 @@ def _job_error(
     return error
 
 
+def _carry_key(exc: BaseException, key: str) -> None:
+    """Attach the sent Idempotency-Key to a non-DocQL exception leaving a submit (WR-01).
+
+    The exception keeps its type (``except KeyboardInterrupt`` still works); the
+    key goes on its ``idempotency_key`` attribute and one key-free note says
+    where to find it. A DocQL error already carries the key as a field, and an
+    exception that already has the attribute is left alone. The store goes
+    through the instance ``__dict__``; if the object refuses it, the original
+    exception is re-raised unchanged rather than masked.
+    """
+    if isinstance(exc, DocQLException):
+        return
+    with contextlib.suppress(AttributeError, TypeError):
+        if hasattr(exc, "idempotency_key"):
+            return
+        exc.__dict__["idempotency_key"] = key
+        exc.add_note(_KEY_NOTE)
+
+
 def _is_replayable(file: object) -> bool:
     """True when the submit body can be rebuilt byte for byte from its start (D-07).
 
@@ -387,7 +417,12 @@ def submit_with_retry(
     failure to rewind, re-open, re-read or re-send the input is raised as
     :class:`DocQLConnectionError` with the key, chained from the original, and
     nothing more is sent (Go's ``*ConnectionError``, Java's
-    ``DocQLConnectionException``). Before the first request nothing is wrapped.
+    ``DocQLConnectionException``). Any other exception that leaves a send or a
+    retry sleep (a ``KeyboardInterrupt``, ``SystemExit``, ...) keeps its type
+    and carries the key as its ``idempotency_key`` attribute, with a note that
+    names the attribute but never the key (:func:`_carry_key`). Before the
+    first request nothing is wrapped. Callers who must resume after a crash
+    pass their own ``idempotency_key=`` (DocQL scopes it to the org, OD-14).
     """
     key = (
         validate_idempotency_key(idempotency_key)
@@ -403,12 +438,15 @@ def submit_with_retry(
     attempt = 0
     while True:
         attempt += 1
+        # True once a request with this key may have reached the transport.
+        handed = attempt > 1
         try:
             if attempt > 1 and stream is not None:
                 stream.seek(start)
             with prepare_upload(
                 file, query=query, prompt=prompt, mode=mode, filename=filename
             ) as upload:
+                handed = True
                 status, headers, body = _send_once(
                     client,
                     "POST",
@@ -417,12 +455,14 @@ def submit_with_retry(
                     idempotency_keys=(key,),
                     timeout=client._timeout,
                 )
-        except Exception as exc:
-            if attempt == 1 or isinstance(exc, DocQLException):
-                raise
-            # A job may exist from an earlier attempt: never send a partial or
-            # different body under this key, and never lose the key.
-            raise DocQLConnectionError(_REREAD_ERROR, idempotency_key=key) from exc
+        except BaseException as exc:
+            if attempt > 1 and isinstance(exc, Exception) and not isinstance(exc, DocQLException):
+                # A job may exist from an earlier attempt: never send a partial
+                # or different body under this key, and never lose the key.
+                raise DocQLConnectionError(_REREAD_ERROR, idempotency_key=key) from exc
+            if handed:
+                _carry_key(exc, key)
+            raise
         if 200 <= status < 300:
             try:
                 return parse_job(status, headers, body, client._api_key, idempotency_key=key)
@@ -437,10 +477,16 @@ def submit_with_retry(
         if not (retryable and replayable and attempt < SUBMIT_MAX_ATTEMPTS):
             raise error
         server = parse_retry_after(_header(headers, "retry-after"))
-        if server is not None:
-            _sleep(min(max(server, RETRY_AFTER_FLOOR), RETRY_AFTER_CAP))
-        else:
-            _sleep(SUBMIT_BACKOFF[attempt - 1])
+        delay = (
+            min(max(server, RETRY_AFTER_FLOOR), RETRY_AFTER_CAP)
+            if server is not None
+            else SUBMIT_BACKOFF[attempt - 1]
+        )
+        try:
+            _sleep(delay)
+        except BaseException as exc:
+            _carry_key(exc, key)
+            raise
 
 
 def fetch_job(client: DocQL, job_id: str) -> Job:

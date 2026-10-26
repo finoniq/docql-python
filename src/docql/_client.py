@@ -237,6 +237,15 @@ class DocQL:
         The key is on the returned Job and on every error this call raises, so
         you can retry safely with it. A job that ended ``failed`` (including
         ``job_interrupted``) needs a new key: the old one replays the failure.
+
+        Once the first request has gone out a job may exist. If the input then
+        cannot be rewound, re-opened or re-read for a retry, this raises
+        :class:`DocQLConnectionError` with ``idempotency_key`` set (the original
+        error is its ``__cause__``) and sends nothing more. An interrupt (Ctrl-C,
+        ``SystemExit``) or any other non-DocQL exception after that point keeps
+        its type and carries the key as its ``idempotency_key`` attribute; the
+        key is never printed. If you must resume after a crash, pass your own
+        ``idempotency_key=``.
         """
         return submit_with_retry(
             self,

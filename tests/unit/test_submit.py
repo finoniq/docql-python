@@ -664,17 +664,20 @@ def test_an_interrupt_during_a_later_retry_sleep_carries_the_same_key(
 
 def test_the_interrupt_note_never_contains_the_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_jobs, "_sleep", interrupt)
+    # Bound to a name so the traceback's source lines (it quotes the calling line) cannot
+    # contain the value: only the SDK's own output is under test.
+    key = "secret-interrupt-key"
     recorder = Recorder(UNAVAILABLE, QUEUED)
     with pytest.raises(KeyboardInterrupt) as excinfo:
-        submit(recorder, idempotency_key="secret-interrupt-key")
+        submit(recorder, idempotency_key=key)
     notes = getattr(excinfo.value, "__notes__", [])
     assert len(notes) == 1
     assert "idempotency_key" in notes[0]
-    assert "secret-interrupt-key" not in notes[0]
+    assert key not in notes[0]
     printed = "".join(traceback.format_exception(excinfo.value))
     assert "idempotency_key" in printed
-    assert "secret-interrupt-key" not in printed
-    assert "secret-interrupt-key" not in repr(excinfo.value)
+    assert key not in printed
+    assert key not in repr(excinfo.value)
 
 
 @pytest.mark.parametrize(
