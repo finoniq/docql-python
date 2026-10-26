@@ -187,7 +187,9 @@ def test_w7_default_timeout_is_900_and_never_sleeps_past_it(clock: FakeClock) ->
         client_for(script).wait(JOB_ID)
     assert clock.now == 900
     assert excinfo.value.timeout == 900.0
-    assert len(script.requests) == 900 // 5 + 1
+    # Polls at 0, 5, ..., 895 s: the sleep that ends on 900 s ends the wait,
+    # never a 181st poll at the deadline (owner decision 2026-10-26, as Go and Java).
+    assert len(script.requests) == 180
     assert set(script.methods) == {"GET"}
 
 
@@ -196,6 +198,7 @@ def test_w7_with_a_caller_timeout_of_10_s(clock: FakeClock) -> None:
     with pytest.raises(DocQLWaitTimeoutError) as excinfo:
         client_for(script).wait(JOB_ID, timeout=10)
     assert clock.sleeps == [5, 5]
+    assert len(script.requests) == 2
     assert excinfo.value.job_id == JOB_ID
     assert excinfo.value.timeout == 10
     assert JOB_ID in str(excinfo.value)
@@ -213,12 +216,41 @@ def test_w1_without_retry_after_sleeps_1_s(clock: FakeClock) -> None:
     assert clock.sleeps == [1, 1]
 
 
-def test_a_sleep_landing_exactly_on_the_deadline_is_taken(clock: FakeClock) -> None:
+def test_a_sleep_ending_exactly_on_the_deadline_ends_the_wait_without_a_poll(
+    clock: FakeClock,
+) -> None:
+    """No poll is sent at or past the deadline (owner decision 2026-10-26, as Go and Java).
+
+    timeout 4 s with Retry-After 2 twice: polls at 0 s and 2 s, the second
+    sleep ends exactly on the deadline, and the wait raises instead of a third
+    poll at 4 s (the scripted SUCCEEDED answer is never fetched).
+    """
     script = Script([RUNNING, RUNNING, SUCCEEDED])
-    job = client_for(script).wait(JOB_ID, timeout=4)
-    assert job.status == JOB_STATUS_SUCCEEDED
+    with pytest.raises(DocQLWaitTimeoutError) as excinfo:
+        client_for(script).wait(JOB_ID, timeout=4)
     assert clock.sleeps == [2, 2]
-    assert len(script.requests) == 3
+    assert clock.now == 4
+    assert len(script.requests) == 2
+    assert set(script.methods) == {"GET"}
+    assert excinfo.value.job_id == JOB_ID
+    assert excinfo.value.timeout == 4
+
+
+def test_a_sleep_that_overshoots_the_deadline_ends_the_wait_without_a_poll(
+    clock: FakeClock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real sleep may return late; past the deadline the wait raises, never polls."""
+
+    def late_sleep(seconds: float) -> None:
+        clock.sleeps.append(seconds)
+        clock.now += seconds + 0.5
+
+    monkeypatch.setattr(_jobs, "_sleep", late_sleep)
+    script = Script([RUNNING, RUNNING, SUCCEEDED])
+    with pytest.raises(DocQLWaitTimeoutError):
+        client_for(script).wait(JOB_ID, timeout=2.2)
+    assert clock.sleeps == [2]
+    assert len(script.requests) == 1
 
 
 def test_a_sleep_past_the_deadline_raises_without_sleeping(clock: FakeClock) -> None:
@@ -368,7 +400,7 @@ def test_an_unknown_status_is_polled_until_the_deadline(clock: FakeClock) -> Non
     with pytest.raises(DocQLWaitTimeoutError):
         client_for(script).wait(JOB_ID, timeout=10)
     assert clock.sleeps == [1] * 10
-    assert len(script.requests) == 11
+    assert len(script.requests) == 10
     assert set(script.methods) == {"GET"}
 
 
