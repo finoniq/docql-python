@@ -469,3 +469,132 @@ def test_one_idempotency_key_line_per_request(sleeps: list[float]) -> None:
     for request in recorder.requests:
         lines = [value for name, value in request.headers.raw if name.lower() == b"idempotency-key"]
         assert lines == [b"one-line"]
+
+
+# --- a failed re-read after the first request (WR-01, D-08) -------------------------------
+# A 503 may already have created the job, so once the first request has gone out every
+# failure to rebuild the same body is a DocQLConnectionError that carries the key (as Go's
+# *ConnectionError and Java's DocQLConnectionException), and nothing more is sent.
+
+RETRY_1 = envelope(503, "upstream_unavailable", {"Retry-After": "1"})
+
+
+def after(action: Callable[[], object], answer: Answer) -> Answer:
+    """Run ``action`` while the server answers, then answer."""
+
+    def run(request: httpx.Request) -> httpx.Response:
+        action()
+        return answer(request)
+
+    return run
+
+
+class _Breakable(io.BytesIO):
+    """A BytesIO whose seek or sized read raises OSError once ``broken`` is set."""
+
+    broken = False
+    break_seek = False
+    break_read = False
+
+    def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
+        if self.broken and self.break_seek:
+            raise OSError("unit: seek failed")
+        return super().seek(offset, whence)
+
+    def read(self, size: int | None = -1) -> bytes:
+        # read(0) still answers b"", so the object stays a binary stream (D-15).
+        if self.broken and self.break_read and size != 0:
+            raise OSError("unit: read failed")
+        return super().read(size)
+
+    def set_broken(self) -> None:
+        self.broken = True
+
+
+def assert_reread_error(err: DocQLConnectionError, recorder: Recorder) -> str:
+    key = keys_sent(recorder)[0][0]
+    assert type(err) is DocQLConnectionError
+    assert err.idempotency_key == key
+    assert len(recorder.requests) == 1
+    assert "the job may exist" in str(err)
+    assert key not in str(err)
+    assert key not in repr(err)
+    return key
+
+
+def test_a_path_deleted_after_a_503_raises_a_connection_error_with_the_key(
+    sleeps: list[float], tmp_path: Path
+) -> None:
+    path = tmp_path / "doc.pdf"
+    path.write_bytes(PDF)
+    recorder = Recorder(after(path.unlink, RETRY_1), QUEUED)
+    with pytest.raises(DocQLConnectionError) as excinfo:
+        submit(recorder, str(path), filename=None)
+    key = assert_reread_error(excinfo.value, recorder)
+    # No idempotency_key= was passed: the generated key is the one on the error.
+    assert len(key) == 43
+    assert isinstance(excinfo.value.__cause__, FileNotFoundError)
+    assert sleeps == [1]
+
+
+def test_a_stream_whose_rewind_fails_after_a_503_raises_a_connection_error_with_the_key(
+    sleeps: list[float],
+) -> None:
+    stream = _Breakable(PDF)
+    stream.break_seek = True
+    recorder = Recorder(after(stream.set_broken, RETRY_1), QUEUED)
+    with pytest.raises(DocQLConnectionError) as excinfo:
+        submit(recorder, stream, idempotency_key="order-11")
+    assert assert_reread_error(excinfo.value, recorder) == "order-11"
+    assert isinstance(excinfo.value.__cause__, OSError)
+
+
+def test_a_stream_closed_after_a_503_raises_a_connection_error_with_the_key(
+    sleeps: list[float],
+) -> None:
+    stream = io.BytesIO(PDF)
+    recorder = Recorder(after(stream.close, RETRY_1), QUEUED)
+    with pytest.raises(DocQLConnectionError) as excinfo:
+        submit(recorder, stream, idempotency_key="order-12")
+    assert assert_reread_error(excinfo.value, recorder) == "order-12"
+    assert isinstance(excinfo.value.__cause__, ValueError)
+
+
+def test_a_read_error_during_the_retry_upload_raises_a_connection_error_with_the_key(
+    sleeps: list[float],
+) -> None:
+    stream = _Breakable(PDF)
+    stream.break_read = True
+    recorder = Recorder(after(stream.set_broken, RETRY_1), QUEUED)
+    with pytest.raises(DocQLConnectionError) as excinfo:
+        submit(recorder, stream, idempotency_key="order-13")
+    # The second request never completed: the transport failed reading its body.
+    assert assert_reread_error(excinfo.value, recorder) == "order-13"
+    assert isinstance(excinfo.value.__cause__, OSError)
+
+
+def test_a_missing_path_on_the_first_attempt_still_raises_before_any_request(
+    tmp_path: Path,
+) -> None:
+    recorder = Recorder(QUEUED)
+    with pytest.raises(FileNotFoundError) as excinfo:
+        submit(recorder, str(tmp_path / "missing.pdf"), filename=None)
+    # No request, so no job can exist: v0.1's error, unchanged and without a key.
+    assert recorder.requests == []
+    assert not hasattr(excinfo.value, "idempotency_key")
+
+
+def test_resubmitting_with_the_key_from_a_reread_error_sends_that_key(
+    sleeps: list[float], tmp_path: Path
+) -> None:
+    path = tmp_path / "doc.pdf"
+    path.write_bytes(PDF)
+    with pytest.raises(DocQLConnectionError) as excinfo:
+        submit(Recorder(after(path.unlink, RETRY_1), QUEUED), str(path), filename=None)
+    key = excinfo.value.idempotency_key
+    assert key is not None
+    path.write_bytes(PDF)
+    recorder = Recorder(QUEUED)
+    job = submit(recorder, str(path), filename=None, idempotency_key=key)
+    assert keys_sent(recorder) == [[key]]
+    assert job.idempotency_key == key
