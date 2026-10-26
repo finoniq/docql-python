@@ -25,12 +25,22 @@ route, including each GET inside ``wait()``, must meet the kit's job-route invar
 Cases are independent: each one builds its own clients, transport, bindings and captures,
 and every fingerprint and key embeds the case id plus the run token, so the order the
 cases run in never changes an outcome.
+
+Edge mode (``DOCQL_CONTRACT_EDGE=1``, 26-11): docql-console ``deploy/scripts/sdk-jobs-edge.sh``
+runs this module through Caddy -> gateway -> stub. Only the case ids in
+``DOCQL_EDGE_CASE_IDS`` run (the ones the console's Node edge runner replayed); keys
+``valid`` and ``validOther`` become the gateway keys in ``DOCQL_EDGE_KEY`` (test org 1) and
+``DOCQL_EDGE_KEY_OTHER`` (test org 2), so the cross-org cases prove the gateway's tenant;
+``invalid`` stays the kit's never-issued key; TLS trusts only the Caddy root CA in
+``DOCQL_EDGE_CA``. Outside edge mode nothing changes.
 """
 
 import base64
 import json
+import os
 import re
 import secrets
+import ssl
 import string
 import threading
 import time
@@ -63,6 +73,20 @@ pytestmark = pytest.mark.contract
 ROOT = Path(__file__).resolve().parents[2]
 KIT: dict[str, Any] = json.loads((ROOT / "contract" / "job-cases.json").read_bytes())
 API_KEYS: dict[str, str] = {name: KIT["keys"][name] for name in ("valid", "validOther", "invalid")}
+EDGE = os.environ.get("DOCQL_CONTRACT_EDGE") == "1"
+
+
+def edge_env(name: str) -> str:
+    """An edge-mode input; a missing one fails collection loudly, never a silent skip."""
+    value = os.environ.get(name, "")
+    if not value:
+        raise RuntimeError(f"edge mode (DOCQL_CONTRACT_EDGE=1) needs env {name}")
+    return value
+
+
+if EDGE:
+    API_KEYS["valid"] = edge_env("DOCQL_EDGE_KEY")
+    API_KEYS["validOther"] = edge_env("DOCQL_EDGE_KEY_OTHER")
 KNOWN_VIAS = ("submit", "poll", "cancel", "wait", "sync", "infra")
 RUN_VIAS = ("submit", "poll", "cancel", "wait")
 
@@ -80,6 +104,19 @@ assert re.fullmatch(r"[A-Za-z0-9]{8}", RUN)
 JOB_CASES: list[dict[str, Any]] = [
     c for c in KIT["cases"] if c["target"] == "stub" and c["via"] in RUN_VIAS
 ]
+
+
+def edge_cases() -> list[dict[str, Any]]:
+    """The cases DOCQL_EDGE_CASE_IDS names; an id this module does not run fails collection."""
+    ids = {i for i in edge_env("DOCQL_EDGE_CASE_IDS").split(",") if i}
+    unknown = sorted(ids - {c["id"] for c in JOB_CASES})
+    if unknown:
+        raise RuntimeError(f"DOCQL_EDGE_CASE_IDS names cases this runner does not run: {unknown}")
+    return [c for c in JOB_CASES if c["id"] in ids]
+
+
+# The cases test_job_case runs: every one, or in edge mode the edge-replayed subset.
+RUN_CASES = edge_cases() if EDGE else JOB_CASES
 
 # Every other case is excluded by exactly one named rule (the first that matches).
 EXCLUSIONS: tuple[tuple[str, Callable[[dict[str, Any]], bool]], ...] = (
@@ -165,14 +202,25 @@ class Wire:
 
 
 class CapturingTransport(httpx.BaseTransport):
-    """The real transport, plus a record of every answer (its body read in full)."""
+    """The real transport, plus a record of every answer (its body read in full).
 
-    def __init__(self) -> None:
-        self._inner = httpx.HTTPTransport()
+    Given an edge TLS context, the transport verifies against it and dials 127.0.0.1 at the
+    URL's port while the URL host stays the TLS server name, the certificate name and the
+    Host header (curl --resolve): the console never relies on ``*.localhost`` resolving.
+    """
+
+    def __init__(self, edge_ssl: ssl.SSLContext | None = None) -> None:
+        self._edge = edge_ssl is not None
+        self._inner = (
+            httpx.HTTPTransport() if edge_ssl is None else httpx.HTTPTransport(verify=edge_ssl)
+        )
         self._lock = threading.Lock()
         self.seen: list[tuple[str, str, Wire]] = []
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
+        if self._edge:
+            request.extensions = {**request.extensions, "sni_hostname": request.url.host}
+            request.url = request.url.copy_with(host="127.0.0.1")
         response = self._inner.handle_request(request)
         body = response.read()  # also closes the stream; the client reads the cached bytes
         with self._lock:
@@ -190,8 +238,8 @@ class CapturingTransport(httpx.BaseTransport):
 
 
 @pytest.fixture
-def transport() -> Iterator[CapturingTransport]:
-    capture = CapturingTransport()
+def transport(edge_ssl_context: ssl.SSLContext | None) -> Iterator[CapturingTransport]:
+    capture = CapturingTransport(edge_ssl_context)
     yield capture
     capture.close()
 
@@ -765,7 +813,7 @@ class CaseRunner:
             raise CaseError(f"{where}: reason {reason!r}, expected {expect['reason']!r}")
 
 
-@pytest.mark.parametrize("case", JOB_CASES, ids=[c["id"] for c in JOB_CASES])
+@pytest.mark.parametrize("case", RUN_CASES, ids=[c["id"] for c in RUN_CASES])
 def test_job_case(
     case: dict[str, Any],
     stub_url: str,

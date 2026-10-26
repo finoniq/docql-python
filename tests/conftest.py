@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import ssl
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,11 @@ import httpx
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# Edge mode (26-11, JSDK-04, D-13): docql-console deploy/scripts/sdk-jobs-edge.sh runs the
+# job-case runner through Caddy -> gateway -> stub. DOCQL_STUB_URL is then the gateway's
+# https URL, DOCQL_EDGE_CA the Caddy root CA, and the kit's /__stub routes are not exposed.
+EDGE = os.environ.get("DOCQL_CONTRACT_EDGE") == "1"
 
 
 @pytest.fixture(scope="session")
@@ -47,8 +53,12 @@ def _kit_integrity() -> None:
     manifest, and the vendored file itself. Any mismatch — or a non-200 —
     fails the session; this check can fail, never silently skip. Without a
     stub URL there is nothing to compare and ``stub_url`` owns the
-    require-vs-skip decision.
+    require-vs-skip decision. In edge mode there is nothing to compare either: Caddy
+    exposes no ``/__stub`` routes, and sdk-jobs-edge.sh replays only the cases the
+    console's own edge runner replayed from the same kit.
     """
+    if EDGE:
+        return
     base = os.environ.get("DOCQL_STUB_URL", "").rstrip("/")
     if not base:
         return
@@ -76,3 +86,14 @@ def stub_url(_kit_integrity: None) -> str:
             "DOCQL_STUB_URL is not set: start the pinned stub with scripts/stub-up.sh --run"
         )
     pytest.skip("DOCQL_STUB_URL is not set: start the pinned stub with scripts/stub-up.sh --run")
+
+
+@pytest.fixture(scope="session")
+def edge_ssl_context() -> ssl.SSLContext | None:
+    """In edge mode, a TLS context that trusts only the Caddy root CA in DOCQL_EDGE_CA."""
+    if not EDGE:
+        return None
+    cafile = os.environ.get("DOCQL_EDGE_CA")
+    if not cafile:
+        pytest.fail("edge mode needs DOCQL_EDGE_CA: the Caddy root CA file")
+    return ssl.create_default_context(cafile=cafile)
