@@ -271,9 +271,10 @@ class DocQL:
         job raises its :class:`DocQLError` with ``job_id`` set. Each sleep is
         the server's ``Retry-After`` clamped to [1, 30] s, raised to
         ``poll_interval`` when that is longer. Network errors, 429 and 503 are
-        retried; any other error raises at once. After ``timeout`` seconds
-        (default 900) it raises :class:`DocQLWaitTimeoutError`; the job is
-        never cancelled.
+        retried; any other error raises at once. When ``timeout`` seconds
+        (default 900) run out before the job finishes it raises
+        :class:`DocQLWaitTimeoutError`; no poll is ever sent at or past that
+        deadline, and the job is never cancelled.
         """
         return wait_for(self, job_id, timeout=timeout, poll_interval=poll_interval)
 

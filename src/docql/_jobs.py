@@ -14,8 +14,11 @@ requests and reaches the same outcome on the kit's ``waitCases``:
 * D-05: ``succeeded`` and ``cancelled`` return the Job; ``failed`` raises the
   job's :class:`DocQLError` (``job_id`` set, ``retryable`` False).
 * OD-5: the wait gives up when the next sleep would pass the deadline (900 s by
-  default) and raises :class:`DocQLWaitTimeoutError`. The wait never cancels the
-  job, on any path: cancelling is only the caller's explicit ``cancel_job()``.
+  default) and raises :class:`DocQLWaitTimeoutError`. It never polls at or past
+  the deadline: a sleep that ends exactly on it ends the wait too (as Go and
+  Java; the kit's reference runner polls once more at that instant, an edge no
+  kit case reaches). The wait never cancels the job, on any path: cancelling is
+  only the caller's explicit ``cancel_job()``.
 
 Submits (:func:`submit_with_retry`, D-07) carry one ``Idempotency-Key`` and
 retry a 503 or a 409 ``idempotency_in_progress`` with that same key, at most 4
@@ -504,3 +507,8 @@ def wait_for(client: DocQL, job_id: str, *, timeout: float, poll_interval: float
         if _monotonic() + sleep > deadline:
             raise DocQLWaitTimeoutError(job_id=job_id, timeout=timeout)
         _sleep(sleep)
+        # A sleep that ends exactly on the deadline (or a real sleep that
+        # overshoots it) leaves no time for a poll: never poll at or past the
+        # deadline (owner decision 2026-10-26, as Go and Java).
+        if _monotonic() >= deadline:
+            raise DocQLWaitTimeoutError(job_id=job_id, timeout=timeout)
