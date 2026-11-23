@@ -1,8 +1,12 @@
 """Public reason constants and __all__ pinned against the vendored contract kit (D-05, D-09)."""
 
+import json
+from pathlib import Path
 from typing import Any
 
 import docql
+
+ROOT = Path(__file__).resolve().parents[2]
 
 EXPECTED_ALL = sorted(
     [
@@ -26,6 +30,7 @@ EXPECTED_ALL = sorted(
         "REASON_CONCURRENCY_LIMIT_EXCEEDED",
         "REASON_CORRUPTED_FILE",
         "REASON_DOCUMENT_EXCEEDS_TIME_BUDGET",
+        "REASON_DOCUMENT_TOO_COMPLEX",
         "REASON_IDEMPOTENCY_IN_PROGRESS",
         "REASON_IDEMPOTENCY_KEY_CONFLICT",
         "REASON_INVALID_API_KEY",
@@ -39,6 +44,8 @@ EXPECTED_ALL = sorted(
         "REASON_QUEUE_FULL",
         "REASON_RATE_LIMIT_EXCEEDED",
         "REASON_SERVICE_OVERLOADED",
+        "REASON_SPREADSHEET_TOO_LARGE",
+        "REASON_TOO_MANY_PAGES",
         "REASON_UNSUPPORTED_FILE_TYPE",
         "REASON_UNSUPPORTED_MEDIA_TYPE",
         "REASON_UPLOAD_TOO_LARGE",
@@ -88,8 +95,8 @@ def reason_items() -> dict[str, str]:
     }
 
 
-def test_exactly_twenty_two_reason_constants() -> None:
-    assert len(reason_items()) == 22
+def test_exactly_twenty_five_reason_constants() -> None:
+    assert len(reason_items()) == 25
 
 
 def test_reason_values_are_lowercased_names() -> None:
@@ -115,7 +122,10 @@ def test_reason_values_equal_the_vendored_case_reasons(
         for field in ("reason", "embeddedReason")
     ]
     job += [case["expect"].get("reason") for case in job_cases["waitCases"]]
-    expected = {reason for reason in sdk + job if reason is not None}
+    sheet_cases: dict[str, Any] = json.loads((ROOT / "contract" / "sheet-cases.json").read_bytes())
+    sheet = [case["expect"].get("reason") for case in sheet_cases["cases"]]
+    sheet += [entry["answer"].get("reason") for entry in sheet_cases["fixtures"].values()]
+    expected = {reason for reason in sdk + job + sheet if reason is not None}
     assert set(reason_items().values()) == expected
 
 

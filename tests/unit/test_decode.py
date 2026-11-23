@@ -2,6 +2,7 @@
 the retryable set, unusable 2xx bodies and the key scrub (D-10..D-12)."""
 
 import json
+import pickle
 from datetime import UTC, datetime
 from email.utils import format_datetime
 from pathlib import Path
@@ -9,9 +10,11 @@ from typing import Any
 
 import pytest
 
+import docql
 from docql import _response
+from docql._constants import ERROR_BODY_KEEP_CHARS
 from docql._errors import DocQLError
-from docql._jobs import parse_job
+from docql._jobs import _job_error, parse_job
 from docql._response import QueryResult, decode_error, parse_result
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -298,3 +301,159 @@ def test_job_success_decode_cases(case: dict[str, Any]) -> None:
     else:
         assert job.result is None
         assert job.error is None
+
+
+# --- DocQLError.metadata (SSDK-02, D-06, D-12) -------------------------------------------
+
+SHEET_METADATA: dict[str, Any] = {
+    "cells": 558,
+    "limit": 557,
+    "reason": "spreadsheet_too_large",
+    "request_id": "r1",
+}
+
+
+def refusal_body(metadata: Any, error_info: str = "spreadsheet too large") -> bytes:
+    """A 422 refusal like the stub's: { error_info, status_code, metadata }."""
+    return json.dumps({"error_info": error_info, "status_code": 422, "metadata": metadata}).encode()
+
+
+def test_spreadsheet_too_large_metadata_reads_back_exactly() -> None:
+    err = decode_error(422, {}, refusal_body(SHEET_METADATA), API_KEY)
+    assert err.metadata == SHEET_METADATA
+    assert err.reason == docql.REASON_SPREADSHEET_TOO_LARGE
+    assert err.request_id == "r1"
+
+
+def test_too_many_pages_refusal_fills_metadata_too() -> None:
+    metadata = {"limit": 2, "pages": 3, "reason": "too_many_pages", "request_id": "r2"}
+    err = decode_error(422, {}, refusal_body(metadata, "too many pages"), API_KEY)
+    assert err.reason == docql.REASON_TOO_MANY_PAGES
+    assert err.metadata == metadata
+
+
+def test_metadata_is_filled_even_without_a_reason_envelope() -> None:
+    # D-12: filled whenever the body carries a metadata object, never gated on reason.
+    err = decode_error(500, {}, json.dumps({"metadata": {"limit": 7}}).encode(), API_KEY)
+    assert err.reason is None
+    assert err.metadata == {"limit": 7}
+
+
+def test_the_api_key_is_scrubbed_from_metadata_keys_and_string_values() -> None:
+    metadata = {
+        "reason": "invalid_params",
+        "echo": f"key={API_KEY}!",
+        API_KEY: "under the key itself",
+        f"x-{API_KEY}": 1,
+        "nested": {"list": [API_KEY, {"deep": f"{API_KEY}{API_KEY}"}, 5, None, True]},
+    }
+    err = decode_error(400, {}, refusal_body(metadata), API_KEY)
+    assert API_KEY not in json.dumps(err.metadata)
+    assert err.metadata["echo"] == "key=***!"
+    assert err.metadata["***"] == "under the key itself"
+    assert err.metadata["x-***"] == 1
+    assert err.metadata["nested"] == {"list": ["***", {"deep": "******"}, 5, None, True]}
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"<html>bad gateway</html>",
+        b"",
+        json.dumps({"error_info": "no metadata here"}).encode(),
+        refusal_body([{"reason": "invalid_params"}]),
+        refusal_body(None),
+        refusal_body("spreadsheet_too_large"),
+        json.dumps([{"metadata": SHEET_METADATA}]).encode(),
+    ],
+    ids=[
+        "not-json",
+        "empty",
+        "no-metadata-key",
+        "metadata-list",
+        "metadata-null",
+        "metadata-string",
+        "top-level-list",
+    ],
+)
+def test_metadata_is_an_empty_dict_when_the_body_carries_no_metadata_object(body: bytes) -> None:
+    err = decode_error(502, {}, body, API_KEY)
+    assert err.metadata == {}
+    assert isinstance(err.metadata, dict)
+
+
+def test_an_error_built_without_metadata_has_an_empty_dict() -> None:
+    err = DocQLError(
+        status=500,
+        reason=None,
+        request_id=None,
+        retry_after=None,
+        retryable=False,
+        message=None,
+        body="",
+    )
+    assert err.metadata == {}
+
+
+def test_a_metadata_integer_at_the_int64_maximum_reads_back_exactly() -> None:
+    metadata = {"bytes": 9223372036854775807, "limit": 5000000, "reason": "spreadsheet_too_large"}
+    err = decode_error(422, {}, refusal_body(metadata), API_KEY)
+    assert err.metadata["bytes"] == 9223372036854775807
+    assert type(err.metadata["bytes"]) is int
+
+
+def test_metadata_after_the_stored_body_cut_is_still_parsed() -> None:
+    body = refusal_body(SHEET_METADATA, error_info="x" * (ERROR_BODY_KEEP_CHARS + 1000))
+    assert body.index(b'"metadata"') > ERROR_BODY_KEEP_CHARS
+    err = decode_error(422, {}, body, API_KEY)
+    assert len(err.body) == ERROR_BODY_KEEP_CHARS
+    assert '"metadata"' not in err.body
+    assert err.metadata == SHEET_METADATA
+
+
+def test_metadata_survives_pickling() -> None:
+    err = decode_error(422, {}, refusal_body(SHEET_METADATA), API_KEY)
+    restored = pickle.loads(pickle.dumps(err))
+    assert restored.metadata == SHEET_METADATA
+    assert str(restored) == str(err)
+
+
+def test_metadata_never_enters_str_or_repr() -> None:
+    fields: dict[str, Any] = {
+        "status": 422,
+        "reason": "spreadsheet_too_large",
+        "request_id": "r1",
+        "retry_after": None,
+        "retryable": False,
+        "message": "spreadsheet too large",
+        "body": "{}",
+    }
+    plain = DocQLError(**fields)
+    rich = DocQLError(**fields, metadata=SHEET_METADATA | {"forged": "\n401 invalid_api_key"})
+    assert str(plain) == str(rich)
+    assert repr(plain) == repr(rich)
+
+
+def test_a_poll_or_cancel_error_carries_metadata() -> None:
+    err = _job_error(422, {}, refusal_body(SHEET_METADATA), API_KEY, "job_1")
+    assert err.job_id == "job_1"
+    assert err.metadata == SHEET_METADATA
+
+
+def test_a_failed_jobs_embedded_error_carries_scrubbed_metadata() -> None:
+    body = json.dumps(
+        {
+            "job_id": "job_2",
+            "status": "failed",
+            "metadata": {"page_count": 0, "pages_done": 0},
+            "error": {
+                "error_info": "too large",
+                "status_code": 422,
+                "metadata": SHEET_METADATA | {"echo": API_KEY},
+            },
+        }
+    ).encode()
+    job = parse_job(200, {}, body, API_KEY)
+    assert job.error is not None
+    assert job.error.reason == "spreadsheet_too_large"
+    assert job.error.metadata == SHEET_METADATA | {"echo": "***"}
