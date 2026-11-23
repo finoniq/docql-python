@@ -134,9 +134,7 @@ from docql import DocQL
 with DocQL() as client:  # reads DOCQL_API_KEY and DOCQL_API_URL
     data = Path("sales.csv").read_bytes()
     try:
-        result = client.query_document(
-            data, query="{ region total_sales }", filename="sales.csv"
-        )
+        result = client.query_document(data, query="{ region total_sales }", filename="sales.csv")
         print(result.page_count)
     except docql.DocQLError as err:
         if err.reason != docql.REASON_SPREADSHEET_TOO_LARGE:
