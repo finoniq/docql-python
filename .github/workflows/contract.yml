@@ -97,3 +97,5 @@ jobs:
         run: scripts/stub-up.sh --run uv run --locked python scripts/run_readme.py
       - name: README jobs example
         run: scripts/stub-up.sh --run uv run --locked python scripts/run_readme.py --block jobs
+      - name: README spreadsheet example
+        run: scripts/stub-up.sh --run uv run --locked python scripts/run_readme.py --block spreadsheet

@@ -111,6 +111,40 @@ binary file object:
 - There are no client-side type or size checks — the server is the authority.
 - A stream whose length cannot be measured is sent chunked; an oversized one
   may answer `503` instead of `413`. The API rejects files over 25 MiB.
+- A CSV is recognised only by a file name that ends in `.csv`, in any letter
+  case (`sales.csv`, `SALES.CSV`). When you send `bytes` or a stream, pass the
+  name with `filename=`. The name is sent exactly as given and never trimmed,
+  so `"a.csv "` with a trailing space is refused with `unsupported_file_type`.
+
+## Spreadsheets
+
+`.xlsx`, `.ods` and `.csv` files are sent like any other file. A refused
+spreadsheet raises `docql.DocQLError`, whose `metadata` is the server's raw
+refusal object. For `spreadsheet_too_large` it holds the measured value under
+its axis key (`cells`, `runes`, `estimated_output_tokens` or `bytes`), plus
+`limit`, `reason` and `request_id`. Find the axis by name, not by key order:
+
+<!-- docql:spreadsheet:start -->
+```python
+from pathlib import Path
+
+import docql
+from docql import DocQL
+
+with DocQL() as client:  # reads DOCQL_API_KEY and DOCQL_API_URL
+    data = Path("sales.csv").read_bytes()
+    try:
+        result = client.query_document(
+            data, query="{ region total_sales }", filename="sales.csv"
+        )
+        print(result.page_count)
+    except docql.DocQLError as err:
+        if err.reason != docql.REASON_SPREADSHEET_TOO_LARGE:
+            raise
+        axis = next(k for k in err.metadata if k not in ("limit", "reason", "request_id"))
+        print(f"too large: {axis}={err.metadata[axis]} limit={err.metadata['limit']}")
+```
+<!-- docql:spreadsheet:end -->
 
 ## Modes
 

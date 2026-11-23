@@ -2,8 +2,9 @@
 """Run a README example against the pinned stub (SC4, PY-06).
 
 Extracts the single fenced Python block between the ``docql:<block>`` markers
-(``--block quickstart``, the default, or ``--block jobs``), writes
-``invoice.pdf`` from the golden contract kit into a fresh temporary directory,
+(``--block quickstart``, the default, ``--block jobs`` or ``--block spreadsheet``),
+writes ``invoice.pdf`` from the golden contract kit and ``sales.csv`` from the
+kit's ``sheets/plain.csv`` into a fresh temporary directory,
 and runs the block there with the interpreter that runs this script. Stdlib
 only, so a clean release venv can run it unchanged.
 """
@@ -20,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-BLOCKS = ("quickstart", "jobs")
+BLOCKS = ("quickstart", "jobs", "spreadsheet")
 FENCED_BLOCK = re.compile(r"```([^\n`]*)\n(.*?)```", re.DOTALL)
 VERSION_PROBE = "import importlib.metadata; print(importlib.metadata.version('docql'))"
 RUN_TIMEOUT_SECONDS = 120
@@ -99,6 +100,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
         (work / "invoice.pdf").write_bytes(base64.b64decode(file_base64))
+        (work / "sales.csv").write_bytes((ROOT / "contract" / "sheets" / "plain.csv").read_bytes())
         (work / f"{block}.py").write_text(code, encoding="utf-8")
         if expect_version is not None:
             probe = run_child([sys.executable, "-I", "-c", VERSION_PROBE], work, env, tag)
