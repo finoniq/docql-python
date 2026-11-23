@@ -220,7 +220,7 @@ two mean the request was not processed.
 ## Versioning
 
 The SDK follows [Semantic Versioning](https://semver.org/). While the major
-version is 0, a minor release may change the API; pin `docql>=0.2,<0.3` until
+version is 0, a minor release may change the API; pin `docql>=0.3,<0.4` until
 1.0.
 
 ## Support

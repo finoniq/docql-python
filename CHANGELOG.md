@@ -5,6 +5,37 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-11-23
+
+### Added
+
+- `DocQLError.metadata`: the server's raw refusal metadata as a `dict`, with
+  the API key scrubbed from every key and string value. It is `{}` when the
+  answer carries no metadata object, is filled on `query_document` and on every
+  job method, and is kept through pickling. For `spreadsheet_too_large` it
+  holds the measured value under its axis key (`cells`, `runes`,
+  `estimated_output_tokens` or `bytes`) plus `limit`, `reason` and `request_id`
+- Three new reason constants: `REASON_SPREADSHEET_TOO_LARGE`,
+  `REASON_DOCUMENT_TOO_COMPLEX` and `REASON_TOO_MANY_PAGES`
+- A README spreadsheet example and the CSV file-name rule: a CSV is recognised
+  only by a name ending in `.csv` (any case), `bytes` and streams need
+  `filename=`, and the name is sent exactly as given
+
+### Changed
+
+- The vendored contract kit is now v5 (stub pin `sha-1a3c3ce`), and the test
+  suite runs its 26 spreadsheet cases on both the sync and the jobs route
+- The README now suggests pinning `docql>=0.3,<0.4`
+
+No breaking changes: code written against 0.2.1 runs unchanged.
+
+### Release
+
+0.3.0 is uploaded from a maintainer machine with a project-scoped PyPI API
+token instead of Trusted Publishing, so unlike 0.1.0 and 0.2.x it has no
+PEP 740 attestation. Check a download against the sha256 digests PyPI lists
+for each file.
+
 ## [0.2.1] - 2026-10-26
 
 ### Fixed
@@ -87,6 +118,7 @@ No breaking changes: code written against 0.1.0 runs unchanged.
   reason constants
 - Typed package (`py.typed`)
 
+[0.3.0]: https://github.com/finoniq/docql-python/tree/v0.3.0
 [0.2.1]: https://github.com/finoniq/docql-python/tree/v0.2.1
 [0.2.0]: https://github.com/finoniq/docql-python/tree/v0.2.0
 [0.1.0]: https://github.com/finoniq/docql-python/tree/v0.1.0
