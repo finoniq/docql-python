@@ -75,6 +75,24 @@ jobs:
             echo "expected $WANT job-case PASSED lines, saw $ran" >&2
             exit 1
           fi
+      - name: every sheet case ran and passed (SSDK exact-count gate)
+        # Kit v5: every sheet case runs once per route (sync and jobs). A silently
+        # skipped or deselected run must fail: the PASSED test_sheet_case lines must
+        # equal the kit's total of routes over all sheet cases.
+        shell: bash
+        run: |
+          WANT=$(jq '[.cases[] | .routes | length] | add // 0' contract/sheet-cases.json)
+          ran=$(grep -cE '^PASSED tests/contract/test_sheet_cases\.py::test_sheet_case\[' "$RUNNER_TEMP/contract.log" || true)
+          bad=$(grep -cE '^(FAILED|SKIPPED|ERROR)( \[[0-9]+\])? tests/contract/test_sheet_cases\.py' "$RUNNER_TEMP/contract.log" || true)
+          echo "SHEET_CASES_RAN $ran (want $WANT)"
+          if [ "$bad" -ne 0 ]; then
+            echo "test_sheet_cases.py has $bad FAILED/SKIPPED/ERROR lines" >&2
+            exit 1
+          fi
+          if [ "$WANT" -eq 0 ] || [ "$ran" -ne "$WANT" ]; then
+            echo "expected $WANT sheet-case PASSED lines, saw $ran" >&2
+            exit 1
+          fi
       - name: README quickstart
         run: scripts/stub-up.sh --run uv run --locked python scripts/run_readme.py
       - name: README jobs example

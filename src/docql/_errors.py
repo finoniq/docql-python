@@ -35,6 +35,15 @@ class DocQLError(DocQLException):
     cancel error). ``idempotency_key`` is set on errors from
     ``submit_document`` so the caller can retry with the same key; it is a
     field only and never appears in :func:`str` or :func:`repr` (D-08).
+
+    ``metadata`` is the server's raw refusal metadata object, as a dict (D-06).
+    For ``spreadsheet_too_large`` it holds the measured value under its axis
+    key (``cells``, ``runes``, ``estimated_output_tokens`` or ``bytes``),
+    ``limit``, ``reason`` and ``request_id``; for ``too_many_pages`` it holds
+    ``pages`` and ``limit``. Every occurrence of the API key in its keys and
+    string values is replaced with ``***``. It is ``{}`` when the answer
+    carried no metadata object, and it never appears in :func:`str` or
+    :func:`repr`.
     """
 
     def __init__(
@@ -49,6 +58,7 @@ class DocQLError(DocQLException):
         body: str,
         job_id: str | None = None,
         idempotency_key: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
         self.status = status
@@ -60,6 +70,7 @@ class DocQLError(DocQLException):
         self.body = body
         self.job_id = job_id
         self.idempotency_key = idempotency_key
+        self.metadata: dict[str, Any] = {} if metadata is None else metadata
 
     def __str__(self) -> str:
         if self.reason is not None:
@@ -106,6 +117,7 @@ class DocQLError(DocQLException):
                 "body": self.body,
                 "job_id": self.job_id,
                 "idempotency_key": self.idempotency_key,
+                "metadata": self.metadata,
             },
         )
 

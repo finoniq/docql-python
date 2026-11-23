@@ -50,6 +50,22 @@ def _scrub_and_truncate(text: str, api_key: str) -> str:
     return text[:ERROR_BODY_KEEP_CHARS]
 
 
+def _scrub_deep(value: Any, api_key: str) -> Any:
+    """Replace the key in every string inside ``value``, dict keys included (D-06).
+
+    Used for the error metadata, which a developer may log or store: a
+    reflecting server must never get the key into it. Numbers, booleans and
+    None pass through unchanged.
+    """
+    if isinstance(value, str):
+        return value.replace(api_key, "***") if api_key else value
+    if isinstance(value, dict):
+        return {_scrub_deep(k, api_key): _scrub_deep(v, api_key) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_scrub_deep(item, api_key) for item in value]
+    return value
+
+
 def parse_retry_after(value: str | None, now: datetime | None = None) -> int | None:
     """``Retry-After`` as whole seconds, or None when absent/unparsable.
 
@@ -146,18 +162,25 @@ def decode_error(
 
     Classification is by status, never by body shape. An envelope is present
     only when the JSON body is a dict whose ``metadata`` is a dict with a str
-    ``reason``. Neither the stored ``body`` nor ``message`` ever contains the
-    API key, even when the server echoes it back.
+    ``reason``. Neither the stored ``body``, ``message`` nor ``metadata`` ever
+    contains the API key, even when the server echoes it back.
+
+    ``metadata`` is parsed from the whole bounded body, before the stored body
+    is cut, and is filled whenever the body carries a metadata object, for
+    every reason (D-06, D-12); otherwise the error keeps the default ``{}``.
     """
     reason: str | None = None
     message: str | None = None
     request_id: str | None = None
+    metadata_out: dict[str, Any] | None = None
     try:
         doc: Any = json.loads(body)
     except ValueError:
         doc = None
     if isinstance(doc, dict):
         metadata = doc.get("metadata")
+        if isinstance(metadata, dict):
+            metadata_out = _scrub_deep(metadata, api_key)
         if isinstance(metadata, dict) and isinstance(metadata.get("reason"), str):
             reason = metadata["reason"]
             error_info = doc.get("error_info")
@@ -182,4 +205,5 @@ def decode_error(
         retryable=status in (429, 503),
         message=message,
         body=_scrub_and_truncate(body.decode("utf-8", "replace"), api_key),
+        metadata=metadata_out,
     )

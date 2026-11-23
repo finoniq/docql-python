@@ -40,15 +40,21 @@ def golden() -> dict[str, Any]:
 
 
 # Each served kit file: (vendored file name, the stub route that serves it).
-KIT_ROUTES = (("sdk-cases.json", "/__stub/sdk-cases"), ("job-cases.json", "/__stub/job-cases"))
+KIT_ROUTES = (
+    ("sdk-cases.json", "/__stub/sdk-cases"),
+    ("job-cases.json", "/__stub/job-cases"),
+    # The stub has no dedicated sheet route; the kit file is served as-is (kit v5).
+    ("sheet-cases.json", "/__stub/sdk-contract/sheet-cases.json"),
+)
 
 
 @pytest.fixture(scope="session")
 def _kit_integrity() -> None:
     """Prove the served kit equals the vendored kit before any contract test runs (T-11-17).
 
-    For each of ``sdk-cases.json`` (``GET /__stub/sdk-cases``) and
-    ``job-cases.json`` (``GET /__stub/job-cases``) three sha256 values must
+    For each of ``sdk-cases.json`` (``GET /__stub/sdk-cases``),
+    ``job-cases.json`` (``GET /__stub/job-cases``) and ``sheet-cases.json``
+    (``GET /__stub/sdk-contract/sheet-cases.json``) three sha256 values must
     agree: the bytes the stub serves, the file's entry in the vendored
     manifest, and the vendored file itself. Any mismatch — or a non-200 —
     fails the session; this check can fail, never silently skip. Without a
