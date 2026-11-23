@@ -35,9 +35,10 @@ ERROR_BODY_READ_LIMIT: Final[int] = 65536
 # because an early RST may have discarded the 413 (research Pitfall 4).
 MAX_UPLOAD_BYTES: Final[int] = 26_214_400
 
-# Reason constants (D-05, D-09): exactly the 22 non-null reasons of the vendored
-# contract kit — contract/sdk-cases.json (the sync stub and gateway errors) plus
-# contract/job-cases.json (the job errors). The engine's wider class table stays
+# Reason constants (D-05, D-09, D-12): exactly the 25 non-null reasons of the
+# vendored contract kit — contract/sdk-cases.json (the sync stub and gateway
+# errors), contract/job-cases.json (the job errors) and contract/sheet-cases.json
+# (the kit v5 spreadsheet refusals). The engine's wider class table stays
 # reachable through the open ``reason: str``; adding constants later is
 # backward compatible, removing them is not.
 REASON_INVALID_API_KEY: Final[str] = "invalid_api_key"
@@ -62,6 +63,9 @@ REASON_QUEUE_FULL: Final[str] = "queue_full"
 REASON_IDEMPOTENCY_KEY_CONFLICT: Final[str] = "idempotency_key_conflict"
 REASON_IDEMPOTENCY_IN_PROGRESS: Final[str] = "idempotency_in_progress"
 REASON_JOB_INTERRUPTED: Final[str] = "job_interrupted"
+REASON_DOCUMENT_TOO_COMPLEX: Final[str] = "document_too_complex"
+REASON_SPREADSHEET_TOO_LARGE: Final[str] = "spreadsheet_too_large"
+REASON_TOO_MANY_PAGES: Final[str] = "too_many_pages"
 
 # Async jobs (JSDK-01). Status values are open strings (D-09): an unknown status
 # from a future DocQL release is kept verbatim on Job.status, never an error.
