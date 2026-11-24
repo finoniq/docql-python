@@ -16,6 +16,10 @@ EXPECTED_ALL = sorted(
         "DocQLException",
         "DocQLTimeoutError",
         "DocQLWaitTimeoutError",
+        "EVENT_JOB_CANCELLED",
+        "EVENT_JOB_FAILED",
+        "EVENT_JOB_SUCCEEDED",
+        "EVENT_WEBHOOK_TEST",
         "JOB_STATUS_CANCELLED",
         "JOB_STATUS_FAILED",
         "JOB_STATUS_QUEUED",
@@ -51,7 +55,10 @@ EXPECTED_ALL = sorted(
         "REASON_UPLOAD_TOO_LARGE",
         "REASON_UPSTREAM_AUTH_FAILED",
         "REASON_UPSTREAM_UNAVAILABLE",
+        "WebhookEvent",
+        "WebhookVerificationError",
         "__version__",
+        "verify_webhook",
     ]
 )
 
