@@ -1,6 +1,6 @@
 [project]
 name = "docql"
-version = "0.3.0"
+version = "0.4.0"
 description = "Python client for the DocQL document-extraction API"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -22,7 +22,7 @@ classifiers = [
 Homepage = "https://github.com/finoniq/docql-python"
 Repository = "https://github.com/finoniq/docql-python"
 Issues = "https://github.com/finoniq/docql-python/issues"
-Changelog = "https://github.com/finoniq/docql-python/releases"
+Changelog = "https://github.com/finoniq/docql-python/blob/main/CHANGELOG.md"
 
 [dependency-groups]
 dev = ["pytest>=9.1.1", "mypy>=2.4.0", "ruff>=0.16.10"]

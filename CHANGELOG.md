@@ -5,6 +5,50 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-11-24
+
+### Added
+
+- `docql.verify_webhook(body, headers, secrets, *, tolerance=300)` verifies a
+  DocQL webhook delivery, signed as the open Standard Webhooks spec describes,
+  and returns a frozen `docql.WebhookEvent` (`id`, `type`, `timestamp`,
+  `job_id`, `status`, `data`). Pass the raw request bytes, the request headers
+  and one secret, or a list of secrets while a rotation overlaps. `tolerance`
+  is the allowed clock difference in seconds
+- `docql.WebhookVerificationError`, a `DocQLException` whose `reason` is one of
+  `missing_header`, `invalid_timestamp`, `invalid_signature_header`,
+  `signature_mismatch`, `timestamp_too_old`, `timestamp_too_new` or
+  `invalid_payload`
+- Four event type constants: `EVENT_JOB_SUCCEEDED`, `EVENT_JOB_FAILED`,
+  `EVENT_JOB_CANCELLED` and `EVENT_WEBHOOK_TEST`
+- A README `## Webhooks` section with a receiver built on the standard library
+
+### Fixed
+
+- Decoding an error answer or a failed job no longer raises `RecursionError`
+  when the metadata is deeply nested, a regression on Python 3.12 and later.
+  The error is still a `DocQLError`, with the API key scrubbed from the
+  metadata, or with empty metadata when the body is too deep to parse
+
+### Changed
+
+- The README spreadsheet example finds the axis by name (`cells`, `runes`,
+  `estimated_output_tokens` or `bytes`) and re-raises when none is present
+- The vendored contract kit moves to v6, whose success bodies no longer carry
+  `metadata.screenshot`; the SDK reads a success body with or without that key
+  the same way
+- The PyPI `Changelog` link points at this file
+- The README now suggests pinning `docql>=0.4,<0.5`
+
+No breaking changes: code written against 0.3.0 runs unchanged.
+
+### Release
+
+Like 0.3.0, 0.4.0 is uploaded from a maintainer machine with a project-scoped
+PyPI API token instead of Trusted Publishing, so it has no PEP 740
+attestation. Check a download against the sha256 digests PyPI lists for each
+file.
+
 ## [0.3.0] - 2026-11-23
 
 ### Added
