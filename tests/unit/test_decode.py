@@ -3,6 +3,7 @@ the retryable set, unusable 2xx bodies and the key scrub (D-10..D-12)."""
 
 import json
 import pickle
+import sys
 from datetime import UTC, datetime
 from email.utils import format_datetime
 from pathlib import Path
@@ -457,3 +458,128 @@ def test_a_failed_jobs_embedded_error_carries_scrubbed_metadata() -> None:
     assert job.error is not None
     assert job.error.reason == "spreadsheet_too_large"
     assert job.error.metadata == SHEET_METADATA | {"echo": "***"}
+
+
+# D-33: during the screenshot-removal rollout a success envelope may still carry the
+# legacy "screenshot": null metadata key, or may not. Both decode the same way.
+SUCCESS_METADATA: dict[str, Any] = {
+    "extraction_status": "completed",
+    "page_count": 3,
+    "pages_ocr": 0,
+    "request_id": "req-shot",
+}
+
+
+def success_envelope(with_screenshot: bool) -> dict[str, Any]:
+    metadata = dict(SUCCESS_METADATA)
+    if with_screenshot:
+        metadata["screenshot"] = None
+    return {"data": {"total": 42, "rows": [{"a": 1}]}, "metadata": metadata}
+
+
+def typed_fields(result: QueryResult) -> tuple[Any, ...]:
+    return (result.data, result.request_id, result.page_count, result.pages_ocr)
+
+
+def test_success_envelope_with_and_without_screenshot() -> None:
+    decoded: dict[bool, tuple[QueryResult, QueryResult]] = {}
+    for with_screenshot in (True, False):
+        envelope = success_envelope(with_screenshot)
+        sync = parse_result(200, {}, json.dumps(envelope).encode(), API_KEY)
+        job_body = {
+            "job_id": "job_shot",
+            "status": "succeeded",
+            "metadata": {"page_count": 3, "pages_done": 3},
+            "result": envelope,
+        }
+        job = parse_job(200, {}, json.dumps(job_body).encode(), API_KEY)
+        assert job.error is None
+        assert job.result is not None
+        decoded[with_screenshot] = (sync, job.result)
+    (sync_with, job_with), (sync_without, job_without) = decoded[True], decoded[False]
+    assert typed_fields(sync_with) == typed_fields(sync_without) == typed_fields(job_with)
+    assert typed_fields(job_with) == typed_fields(job_without)
+    assert typed_fields(sync_with) == ({"total": 42, "rows": [{"a": 1}]}, "req-shot", 3, 0)
+    for with_key, without_key in ((sync_with, sync_without), (job_with, job_without)):
+        rest = {k: v for k, v in with_key.metadata.items() if k != "screenshot"}
+        assert rest == without_key.metadata == SUCCESS_METADATA
+
+
+# CR-01 (D-17, D-19): deeply nested error metadata must still give a DocQLError. Never
+# compare or print a deep value here: == and repr recurse (RESEARCH Pitfall 5).
+DEPTHS = [2000, 20000]
+
+
+def nested_key(depth: int) -> bytes:
+    """``[[...["<API key>"]...]]`` with ``depth`` lists, as JSON bytes."""
+    return b"[" * depth + json.dumps(API_KEY).encode() + b"]" * depth
+
+
+def json_parses(body: bytes) -> bool:
+    """Whether this interpreter's json.loads can build the document at all."""
+    try:
+        json.loads(body)
+    except RecursionError:
+        return False
+    return True
+
+
+def deep_leaf(metadata: dict[str, Any]) -> tuple[Any, int]:
+    """Walk metadata["a"] down its single-item lists without recursion."""
+    node: Any = metadata["a"]
+    depth = 0
+    while isinstance(node, list):
+        assert len(node) == 1
+        node = node[0]
+        depth += 1
+    return node, depth
+
+
+def assert_scrubbed_or_empty(err: DocQLError, depth: int, parsed: bool) -> None:
+    if parsed:
+        leaf, found = deep_leaf(err.metadata)
+        assert found == depth
+        assert leaf == "***"
+    else:
+        size = len(err.metadata)
+        assert size == 0
+
+
+@pytest.mark.parametrize("depth", DEPTHS)
+def test_deep_metadata_decode_error(depth: int) -> None:
+    body = b'{"error_info":"deep","metadata":{"a":' + nested_key(depth) + b"}}"
+    parsed = json_parses(body)
+    if sys.version_info >= (3, 12) and depth == 2000:
+        # 3.12+ parses 2,000 levels, so this case runs the scrub itself.
+        assert parsed
+    err = decode_error(422, {}, body, API_KEY)
+    assert isinstance(err, DocQLError)
+    assert err.status == 422
+    assert API_KEY not in err.body
+    assert_scrubbed_or_empty(err, depth, parsed)
+
+
+@pytest.mark.parametrize("depth", DEPTHS)
+def test_deep_metadata_failed_job(depth: int) -> None:
+    body = (
+        b'{"job_id":"job_deep","status":"failed","error":{"status_code":422,'
+        b'"error_info":"deep","metadata":{"a":' + nested_key(depth) + b"}}}"
+    )
+    parsed = json_parses(body)
+    if sys.version_info >= (3, 12) and depth == 2000:
+        assert parsed
+    if parsed:
+        job = parse_job(200, {}, body, API_KEY)
+        assert job.job_id == "job_deep"
+        assert isinstance(job.error, DocQLError)
+        assert job.error.job_id == "job_deep"
+        assert job.error.status == 422
+        assert_scrubbed_or_empty(job.error, depth, parsed)
+    else:
+        # The interpreter cannot build the document: the documented unusable-2xx error.
+        with pytest.raises(DocQLError) as info:
+            parse_job(200, {}, body, API_KEY)
+        assert info.value.reason is None
+        assert info.value.message == "unexpected non-JSON response"
+        assert API_KEY not in info.value.body
+        assert len(info.value.metadata) == 0
