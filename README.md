@@ -70,6 +70,78 @@ with DocQL() as client:  # reads DOCQL_API_KEY and DOCQL_API_URL
 - `job.pages_done` stays 0 while DocQL runs OCR, so show progress as
   indeterminate while a running job reports 0 pages done.
 
+## Webhooks
+
+DocQL signs every webhook delivery with your endpoint's secret, following the
+open Standard Webhooks spec. Verify each delivery with `docql.verify_webhook`
+before you trust it:
+
+- Read the raw request bytes before any JSON framework parses them. A body that
+  was parsed and serialized again never verifies.
+- Pass the endpoint secret (`whsec_…`). During the 24 h rotation overlap, pass
+  both secrets as a list: a delivery signed with either one verifies.
+- The helper does no replay detection. Store each `event.id` and skip one you
+  have already seen: the id is the same across retries and resends.
+- `event.type` is an open string. Compare it with `docql.EVENT_JOB_SUCCEEDED`,
+  `docql.EVENT_JOB_FAILED`, `docql.EVENT_JOB_CANCELLED` or
+  `docql.EVENT_WEBHOOK_TEST`, and ignore a type you do not know. Compare
+  `event.status` with the `docql.JOB_STATUS_*` constants.
+- `tolerance=` (seconds, default 300) is the clock difference allowed between
+  DocQL and your receiver, either way.
+
+A refused delivery raises `docql.WebhookVerificationError`, whose `reason` is
+one of:
+
+- `missing_header`: a `webhook-id`, `webhook-timestamp` or `webhook-signature`
+  header is absent, empty, or repeated with different values
+- `invalid_timestamp`: `webhook-timestamp` is not 1 to 12 ASCII digits
+- `invalid_signature_header`: `webhook-signature` has no well-formed v1 signature
+- `signature_mismatch`: a wrong secret or a changed body
+- `timestamp_too_old`: the signature is valid but older than the tolerance;
+  check your receiver's clock
+- `timestamp_too_new`: the timestamp is further in the future than the tolerance
+- `invalid_payload`: the signed body is not a DocQL webhook event
+
+A receiver built on the standard library:
+
+<!-- docql:webhook:start -->
+```python
+import os
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+import docql
+
+SECRET = os.environ["DOCQL_WEBHOOK_SECRET"]  # whsec_..., from the console
+MAX_BODY = 1024 * 1024
+
+
+class Receiver(BaseHTTPRequestHandler):
+    def do_POST(self) -> None:
+        try:
+            length = int(self.headers["Content-Length"])
+        except (TypeError, ValueError):  # absent or not a number
+            length = -1
+        if not 0 <= length <= MAX_BODY:
+            self.send_response(413 if length > MAX_BODY else 400)
+            self.end_headers()
+            return
+        body = self.rfile.read(length)  # the raw bytes, before any JSON parsing
+        try:
+            event = docql.verify_webhook(body, dict(self.headers), SECRET)
+        except docql.WebhookVerificationError as err:
+            self.log_error("webhook refused: %s", err.reason)
+            self.send_response(400)
+            self.end_headers()
+            return
+        print(f"event {event.type} {event.id}")  # store event.id; skip one already seen
+        self.send_response(204)
+        self.end_headers()
+
+
+HTTPServer(("127.0.0.1", int(os.environ.get("PORT", "8000"))), Receiver).serve_forever()
+```
+<!-- docql:webhook:end -->
+
 ## Configuration
 
 | Keyword | Env variable | Default | Notes |
@@ -139,7 +211,10 @@ with DocQL() as client:  # reads DOCQL_API_KEY and DOCQL_API_URL
     except docql.DocQLError as err:
         if err.reason != docql.REASON_SPREADSHEET_TOO_LARGE:
             raise
-        axis = next(k for k in err.metadata if k not in ("limit", "reason", "request_id"))
+        axes = ("cells", "runes", "estimated_output_tokens", "bytes")
+        axis = next((k for k in axes if k in err.metadata), None)
+        if axis is None:
+            raise
         print(f"too large: {axis}={err.metadata[axis]} limit={err.metadata['limit']}")
 ```
 <!-- docql:spreadsheet:end -->

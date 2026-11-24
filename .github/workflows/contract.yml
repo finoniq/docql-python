@@ -99,3 +99,7 @@ jobs:
         run: scripts/stub-up.sh --run uv run --locked python scripts/run_readme.py --block jobs
       - name: README spreadsheet example
         run: scripts/stub-up.sh --run uv run --locked python scripts/run_readme.py --block spreadsheet
+      - name: README webhook example
+        run: scripts/stub-up.sh --run uv run --locked python scripts/run_readme.py --block webhook
+      - name: README spreadsheet refusal example
+        run: scripts/stub-up.sh --run uv run --locked python scripts/run_readme.py --block spreadsheet --sheet-name toolarge-cells-558-557.csv --expect-line "too large: cells=558 limit=557"
