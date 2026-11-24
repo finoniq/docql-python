@@ -55,15 +55,33 @@ def _scrub_deep(value: Any, api_key: str) -> Any:
 
     Used for the error metadata, which a developer may log or store: a
     reflecting server must never get the key into it. Numbers, booleans and
-    None pass through unchanged.
+    None pass through unchanged. The walk uses an explicit stack, so a deeply
+    nested body cannot raise RecursionError here (CR-01); when two keys scrub
+    to the same text, the later one wins, as before.
     """
-    if isinstance(value, str):
-        return value.replace(api_key, "***") if api_key else value
-    if isinstance(value, dict):
-        return {_scrub_deep(k, api_key): _scrub_deep(v, api_key) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_scrub_deep(item, api_key) for item in value]
-    return value
+
+    def scrub(item: Any) -> Any:
+        return item.replace(api_key, "***") if api_key and isinstance(item, str) else item
+
+    def empty_like(item: Any) -> Any:
+        return {} if isinstance(item, dict) else []
+
+    if not isinstance(value, (dict, list)):
+        return scrub(value)
+    root = empty_like(value)
+    stack: list[tuple[Any, Any]] = [(value, root)]
+    while stack:
+        source, target = stack.pop()
+        pairs = source.items() if isinstance(source, dict) else ((None, v) for v in source)
+        for key, item in pairs:
+            out = empty_like(item) if isinstance(item, (dict, list)) else scrub(item)
+            if isinstance(source, dict):
+                target[scrub(key)] = out
+            else:
+                target.append(out)
+            if isinstance(item, (dict, list)):
+                stack.append((item, out))
+    return root
 
 
 def parse_retry_after(value: str | None, now: datetime | None = None) -> int | None:
@@ -126,7 +144,8 @@ def parse_result(
     """
     try:
         doc: Any = json.loads(body)
-    except ValueError:
+    except (ValueError, RecursionError):
+        # CR-01: a deeply nested body is unusable, never a crash.
         doc = None
     if not isinstance(doc, dict):
         raise _unusable_result(status, headers, body, api_key, "unexpected non-JSON response")
@@ -175,7 +194,8 @@ def decode_error(
     metadata_out: dict[str, Any] | None = None
     try:
         doc: Any = json.loads(body)
-    except ValueError:
+    except (ValueError, RecursionError):
+        # CR-01: a deeply nested body is unusable, never a crash.
         doc = None
     if isinstance(doc, dict):
         metadata = doc.get("metadata")

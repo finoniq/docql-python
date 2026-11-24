@@ -206,7 +206,8 @@ def parse_job(
     """
     try:
         doc: Any = json.loads(body)
-    except ValueError:
+    except (ValueError, RecursionError):
+        # CR-01: a deeply nested body is unusable, never a crash.
         doc = None
     if not isinstance(doc, dict):
         raise _unusable_result(status, headers, body, api_key, "unexpected non-JSON response")

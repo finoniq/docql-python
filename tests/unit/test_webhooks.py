@@ -44,7 +44,9 @@ REASONS = (
 )
 
 
-def verify_valid(body: Any = VALID_BODY, headers: Any = None, secrets: Any = SECRET) -> WebhookEvent:
+def verify_valid(
+    body: Any = VALID_BODY, headers: Any = None, secrets: Any = SECRET
+) -> WebhookEvent:
     return _verify_at(
         body,
         VALID_HEADERS if headers is None else headers,
