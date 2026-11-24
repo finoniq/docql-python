@@ -46,6 +46,15 @@ from docql._errors import (
 from docql._jobs import Job
 from docql._response import QueryResult
 from docql._version import __version__
+from docql._webhooks import (
+    EVENT_JOB_CANCELLED,
+    EVENT_JOB_FAILED,
+    EVENT_JOB_SUCCEEDED,
+    EVENT_WEBHOOK_TEST,
+    WebhookEvent,
+    WebhookVerificationError,
+    verify_webhook,
+)
 
 __all__ = [
     "DocQL",
@@ -54,6 +63,10 @@ __all__ = [
     "DocQLException",
     "DocQLTimeoutError",
     "DocQLWaitTimeoutError",
+    "EVENT_JOB_CANCELLED",
+    "EVENT_JOB_FAILED",
+    "EVENT_JOB_SUCCEEDED",
+    "EVENT_WEBHOOK_TEST",
     "JOB_STATUS_CANCELLED",
     "JOB_STATUS_FAILED",
     "JOB_STATUS_QUEUED",
@@ -89,5 +102,8 @@ __all__ = [
     "REASON_UPLOAD_TOO_LARGE",
     "REASON_UPSTREAM_AUTH_FAILED",
     "REASON_UPSTREAM_UNAVAILABLE",
+    "WebhookEvent",
+    "WebhookVerificationError",
     "__version__",
+    "verify_webhook",
 ]
