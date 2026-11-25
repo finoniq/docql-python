@@ -16,10 +16,10 @@ import json
 import math
 import re
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol
 
 from docql._errors import DocQLException
 
@@ -110,9 +110,15 @@ def _rebuild_webhook_error(reason: str) -> WebhookVerificationError:
     return WebhookVerificationError(reason)
 
 
+class _Headers(Protocol):
+    """Anything with items() of (name, value) pairs: a dict, a Mapping or an HTTPMessage."""
+
+    def items(self) -> Iterable[tuple[str, str]]: ...
+
+
 def verify_webhook(
     body: bytes | str,
-    headers: Mapping[str, str],
+    headers: _Headers,
     secrets: str | Sequence[str],
     *,
     tolerance: float = DEFAULT_TOLERANCE,
@@ -139,7 +145,7 @@ def verify_webhook(
 
 def _verify_at(
     body: bytes | str,
-    headers: Mapping[str, str],
+    headers: _Headers,
     secrets: str | Sequence[str],
     *,
     tolerance: float,
@@ -240,7 +246,7 @@ def _canonical_base64(text: str) -> bytes | None:
     return raw
 
 
-def _read_headers(headers: Mapping[str, str]) -> tuple[str, str, str]:
+def _read_headers(headers: _Headers) -> tuple[str, str, str]:
     found: dict[str, list[str]] = {_HEADER_ID: [], _HEADER_TIMESTAMP: [], _HEADER_SIGNATURE: []}
     for key, value in headers.items():
         # ASCII-only case fold (D-29): a look-alike such as U+212A never matches.
