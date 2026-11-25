@@ -14,17 +14,28 @@ so a stub fixture name such as ``toolarge-cells-558-557.csv`` runs the refusal
 branch; the tag becomes ``README_SPREADSHEET_REFUSAL``. ``--expect-line TEXT``
 requires that exact line in the example's output before the OK tag prints.
 
-The webhook block (D-23) is a receiver that serves until it is stopped: the
-runner starts it on a free loopback port with a secret made for this run (never
-printed), POSTs one delivery signed at run time and expects 2xx plus the line
-``event job.succeeded <id>``, then POSTs the same headers with one body byte
-changed and expects 400 and no second line.
+The webhook block (D-23, D-09) is a receiver that serves until it is stopped:
+the runner starts it on a free loopback port with a secret made for this run
+(never printed) and runs five cases:
+
+- signed: one delivery signed at run time gets 2xx plus the line
+  ``event job.succeeded <id>``;
+- tampered: the same headers with one body byte changed get 400 and no line;
+- decoy-then-real: the same delivery with a well-formed decoy
+  ``webhook-signature`` line before the real one gets 2xx plus the line;
+- malformed secret and empty secret: a separate receiver started with a fixed
+  dummy malformed secret, then with a set-but-empty one, answers a signed
+  delivery with 500, prints no line, keeps running and leaves no Traceback on
+  its stderr.
+
+A dropped connection is reported as ``no HTTP answer``, not a crash.
 """
 
 import argparse
 import base64
 import hashlib
 import hmac
+import http.client
 import json
 import os
 import queue
@@ -39,7 +50,7 @@ import urllib.error
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 ROOT = Path(__file__).resolve().parents[1]
 BLOCKS = ("quickstart", "jobs", "spreadsheet", "webhook")
@@ -51,6 +62,9 @@ SHEET_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 WEBHOOK_READY_SECONDS = 30
 WEBHOOK_LINE_SECONDS = 10
 WEBHOOK_EVENT_ID = "5f0c3a1e-45a1-4d1e-9b00-000000000451"
+# A fixed dummy, never a real secret: well formed (whsec_ + canonical base64) but
+# only 8 bytes, so verify_webhook raises a ValueError that names position 1.
+WEBHOOK_MALFORMED_SECRET = "whsec_AAAAAAAAAAA="
 
 
 def extract_block(readme_text: str, name: str) -> str | None:
@@ -111,6 +125,29 @@ def post(port: int, body: bytes, headers: dict[str, str]) -> int:
             return status
     except urllib.error.HTTPError as err:
         return err.code
+    except OSError:  # a dropped connection (http.client.RemoteDisconnected) or a refusal
+        return 0
+
+
+def post_raw(port: int, body: bytes, header_pairs: list[tuple[str, str]]) -> int:
+    """POST with the header lines in order, repeats kept; the HTTP status, 0 for none."""
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=WEBHOOK_LINE_SECONDS)
+    try:
+        connection.putrequest("POST", "/")
+        for name, value in header_pairs:
+            connection.putheader(name, value)
+        connection.putheader("Content-Length", str(len(body)))
+        connection.endheaders(body)
+        status: int = connection.getresponse().status
+        return status
+    except OSError:
+        return 0
+    finally:
+        connection.close()
+
+
+def describe_status(status: int) -> str:
+    return "no HTTP answer" if status == 0 else f"HTTP {status}"
 
 
 def signed_delivery(secret: str) -> tuple[bytes, dict[str, str]]:
@@ -138,77 +175,141 @@ def signed_delivery(secret: str) -> tuple[bytes, dict[str, str]]:
     return body, headers
 
 
-def run_webhook(work: Path, env: dict[str, str]) -> tuple[bool, str, str]:
-    """Start the receiver, send a signed and a tampered delivery; (ok, stdout, problem)."""
-    secret = "whsec_" + base64.b64encode(os.urandom(32)).decode("ascii")
-    port = free_port()
-    child_env = dict(env, DOCQL_WEBHOOK_SECRET=secret, PORT=str(port))
-    lines: queue.Queue[str] = queue.Queue()
-    seen: list[str] = []
-    stderr_path = work / "webhook.stderr"
-    with stderr_path.open("w", encoding="utf-8") as stderr_file:
-        # -u: -I implies -E, so PYTHONUNBUFFERED would be ignored and print buffered.
-        child = subprocess.Popen(
-            [sys.executable, "-I", "-u", "webhook.py"],
-            cwd=work,
-            env=child_env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=stderr_file,
-            text=True,
-        )
-        assert child.stdout is not None
-        stdout = child.stdout
+class Receiver:
+    """The README receiver as a child process on a free loopback port."""
 
-        def pump() -> None:
-            for line in stdout:
-                lines.put(line.rstrip("\n"))
+    def __init__(self, work: Path, env: dict[str, str], secret: str, stderr_path: Path) -> None:
+        self.port = free_port()
+        self.seen: list[str] = []
+        self._lines: queue.Queue[str] = queue.Queue()
+        child_env = dict(env, DOCQL_WEBHOOK_SECRET=secret, PORT=str(self.port))
+        with stderr_path.open("w", encoding="utf-8") as stderr_file:
+            # -u: -I implies -E, so PYTHONUNBUFFERED would be ignored and print buffered.
+            self.child = subprocess.Popen(
+                [sys.executable, "-I", "-u", "webhook.py"],
+                cwd=work,
+                env=child_env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=stderr_file,
+                text=True,
+            )
+        assert self.child.stdout is not None
+        threading.Thread(target=self._pump, args=(self.child.stdout,), daemon=True).start()
 
-        threading.Thread(target=pump, daemon=True).start()
+    def _pump(self, stdout: IO[str]) -> None:
+        for line in stdout:
+            self._lines.put(line.rstrip("\n"))
 
-        def next_line(wait: float) -> str | None:
-            try:
-                line = lines.get(timeout=wait)
-            except queue.Empty:
-                return None
-            seen.append(line)
-            return line
-
+    def next_line(self, wait: float) -> str | None:
         try:
-            deadline = time.monotonic() + WEBHOOK_READY_SECONDS
-            while True:
-                if child.poll() is not None:
-                    return False, "", f"the receiver exited with {child.returncode}"
-                try:
-                    socket.create_connection(("127.0.0.1", port), timeout=1).close()
-                    break
-                except OSError:
-                    if time.monotonic() > deadline:
-                        return False, "", f"no listener after {WEBHOOK_READY_SECONDS}s"
-                    time.sleep(0.2)
+            line = self._lines.get(timeout=wait)
+        except queue.Empty:
+            return None
+        self.seen.append(line)
+        return line
 
-            body, headers = signed_delivery(secret)
-            status = post(port, body, headers)
-            expected = f"event job.succeeded {WEBHOOK_EVENT_ID}"
-            if not 200 <= status < 300:
-                return False, "\n".join(seen), f"the signed delivery got HTTP {status}"
-            if next_line(WEBHOOK_LINE_SECONDS) != expected:
-                return False, "\n".join(seen), f"no line {expected!r} for the signed delivery"
-
-            tampered = bytearray(body)
-            tampered[-5] ^= 0x01  # one byte of "succeeded" changes; the JSON stays valid
-            status = post(port, bytes(tampered), headers)
-            if status != 400:
-                return False, "\n".join(seen), f"the tampered delivery got HTTP {status}"
-            if next_line(1.0) is not None:
-                return False, "\n".join(seen), "the tampered delivery printed a line"
-        finally:
-            child.terminate()
+    def wait_ready(self) -> str | None:
+        """None once the port accepts connections; else the problem."""
+        deadline = time.monotonic() + WEBHOOK_READY_SECONDS
+        while True:
+            if self.child.poll() is not None:
+                return f"the receiver exited with {self.child.returncode}"
             try:
-                child.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                child.kill()
-                child.wait()
+                socket.create_connection(("127.0.0.1", self.port), timeout=1).close()
+                return None
+            except OSError:
+                if time.monotonic() > deadline:
+                    return f"no listener after {WEBHOOK_READY_SECONDS}s"
+                time.sleep(0.2)
+
+    def stop(self) -> None:
+        self.child.terminate()
+        try:
+            self.child.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self.child.kill()
+            self.child.wait()
+
+
+def run_good_secret_cases(receiver: Receiver, secret: str) -> str | None:
+    """The signed, tampered and decoy-then-real cases; None or the problem."""
+    problem = receiver.wait_ready()
+    if problem is not None:
+        return problem
+    body, headers = signed_delivery(secret)
+    status = post(receiver.port, body, headers)
+    expected = f"event job.succeeded {WEBHOOK_EVENT_ID}"
+    if not 200 <= status < 300:
+        return f"the signed delivery got {describe_status(status)}"
+    if receiver.next_line(WEBHOOK_LINE_SECONDS) != expected:
+        return f"no line {expected!r} for the signed delivery"
+
+    tampered = bytearray(body)
+    tampered[-5] ^= 0x01  # one byte of "succeeded" changes; the JSON stays valid
+    status = post(receiver.port, bytes(tampered), headers)
+    if status != 400:
+        return f"the tampered delivery got {describe_status(status)}"
+    if receiver.next_line(1.0) is not None:
+        return "the tampered delivery printed a line"
+
+    # A well-formed v1 signature of the same content under another key, sent before the
+    # real one: the receiver must pass every webhook-signature line to the helper.
+    content = f"{WEBHOOK_EVENT_ID}.{headers['webhook-timestamp']}.".encode("ascii") + body
+    decoy = hmac.new(os.urandom(32), content, hashlib.sha256).digest()
+    pairs = [(name, headers[name]) for name in ("Content-Type", "webhook-id", "webhook-timestamp")]
+    pairs.append(("webhook-signature", "v1," + base64.b64encode(decoy).decode("ascii")))
+    pairs.append(("webhook-signature", headers["webhook-signature"]))
+    status = post_raw(receiver.port, body, pairs)
+    if not 200 <= status < 300:
+        return f"the decoy-then-real delivery got {describe_status(status)}"
+    if receiver.next_line(WEBHOOK_LINE_SECONDS) != expected:
+        return f"no line {expected!r} for the decoy-then-real delivery"
+    return None
+
+
+def run_bad_secret_case(
+    receiver: Receiver, label: str, secret: str, stderr_path: Path
+) -> str | None:
+    """A receiver with a bad secret answers 500, prints nothing and keeps running."""
+    problem = receiver.wait_ready()
+    if problem is not None:
+        return f"{problem} (the {label} secret)"
+    body, headers = signed_delivery(secret)
+    status = post(receiver.port, body, headers)
+    if status != 500:
+        return f"the {label} secret got {describe_status(status)}"
+    if receiver.next_line(1.0) is not None:
+        return f"the {label} secret printed a line"
+    if receiver.child.poll() is not None:
+        return f"the receiver exited after the {label} secret"
+    if "Traceback" in stderr_path.read_text(encoding="utf-8"):
+        return f"the {label} secret left a Traceback on the receiver's stderr"
+    return None
+
+
+def run_webhook(work: Path, env: dict[str, str]) -> tuple[bool, str, str]:
+    """Run the five receiver cases; (ok, stdout, problem)."""
+    secret = "whsec_" + base64.b64encode(os.urandom(32)).decode("ascii")
+    receiver = Receiver(work, env, secret, work / "webhook.stderr")
+    try:
+        problem = run_good_secret_cases(receiver, secret)
+    finally:
+        receiver.stop()
+    seen = receiver.seen
+    if problem is not None:
+        return False, "\n".join(seen), problem
+
+    for label, bad_secret in (("malformed", WEBHOOK_MALFORMED_SECRET), ("empty", "")):
+        stderr_path = work / f"webhook-{label}.stderr"
+        bad = Receiver(work, env, bad_secret, stderr_path)
+        try:
+            problem = run_bad_secret_case(bad, label, secret, stderr_path)
+        finally:
+            bad.stop()
+        seen = seen + bad.seen
+        if problem is not None:
+            return False, "\n".join(seen), problem
     return True, "\n".join(seen) + "\n", ""
 
 
