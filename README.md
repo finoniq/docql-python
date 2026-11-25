@@ -79,7 +79,9 @@ before you trust it:
 - Read the raw request bytes before any JSON framework parses them. A body that
   was parsed and serialized again never verifies.
 - Pass the endpoint secret (`whsec_…`). During the 24 h rotation overlap, pass
-  both secrets as a list: a delivery signed with either one verifies.
+  both secrets as a list: a delivery signed with either one verifies. Remove the
+  old secret from the list when the overlap ends, and at once if you rolled the
+  secret because it leaked: a secret you still pass still verifies.
 - The helper does no replay detection. Store each `event.id` and skip one you
   have already seen: the id is the same across retries and resends.
 - `event.type` is an open string. Compare it with `docql.EVENT_JOB_SUCCEEDED`,
@@ -127,10 +129,15 @@ class Receiver(BaseHTTPRequestHandler):
             return
         body = self.rfile.read(length)  # the raw bytes, before any JSON parsing
         try:
-            event = docql.verify_webhook(body, dict(self.headers), SECRET)
+            event = docql.verify_webhook(body, self.headers, SECRET)
         except docql.WebhookVerificationError as err:
             self.log_error("webhook refused: %s", err.reason)
             self.send_response(400)
+            self.end_headers()
+            return
+        except ValueError as err:  # a malformed secret: fix the configuration
+            self.log_error("%s", err)
+            self.send_response(500)
             self.end_headers()
             return
         print(f"event {event.type} {event.id}")  # store event.id; skip one already seen
