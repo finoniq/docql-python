@@ -5,6 +5,32 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-11-25
+
+### Fixed
+
+- The README webhook receiver answers a malformed or set-but-empty secret with
+  HTTP 500 instead of dropping the connection, and passes the request headers
+  as they are, so repeated webhook headers follow the documented join and
+  disagreement rules
+- `verify_webhook` accepts header objects such as `http.client.HTTPMessage`
+  and `BaseHTTPRequestHandler.headers` in its type, because the `headers`
+  annotation now matches what the function always accepted at run time
+
+### Changed
+
+- The README rotation guidance says to remove the old secret from the list
+  when the overlap ends, and at once after a roll caused by a leak
+
+No breaking changes: code written against 0.4.0 runs unchanged.
+
+### Release
+
+Like 0.4.0, 0.4.1 is uploaded from a maintainer machine with a project-scoped
+PyPI API token instead of Trusted Publishing, so it has no PEP 740
+attestation. Check a download against the sha256 digests PyPI lists for each
+file.
+
 ## [0.4.0] - 2026-11-24
 
 ### Added
@@ -162,6 +188,8 @@ No breaking changes: code written against 0.1.0 runs unchanged.
   reason constants
 - Typed package (`py.typed`)
 
+[0.4.1]: https://github.com/finoniq/docql-python/tree/v0.4.1
+[0.4.0]: https://github.com/finoniq/docql-python/tree/v0.4.0
 [0.3.0]: https://github.com/finoniq/docql-python/tree/v0.3.0
 [0.2.1]: https://github.com/finoniq/docql-python/tree/v0.2.1
 [0.2.0]: https://github.com/finoniq/docql-python/tree/v0.2.0
