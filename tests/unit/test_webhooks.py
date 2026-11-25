@@ -3,7 +3,9 @@
 import base64
 import dataclasses
 import email.message
+import http.client
 import inspect
+import io
 import json
 import math
 import pickle
@@ -199,6 +201,28 @@ def test_an_email_message_works_as_headers() -> None:
         message[name] = value
     event = verify_valid(headers=message)
     assert event.job_id == VALID["expect"]["event"]["job_id"]
+
+
+def http_message(pairs: list[tuple[str, str]]) -> http.client.HTTPMessage:
+    raw = b"".join(f"{name}: {value}\r\n".encode("latin-1") for name, value in pairs) + b"\r\n"
+    return http.client.parse_headers(io.BytesIO(raw))
+
+
+def test_an_http_message_passes_straight_in() -> None:
+    # Called directly, not through verify_valid, so mypy checks the headers annotation.
+    message = http_message([(name, value) for name, value in VALID["headers"]])
+    event = _verify_at(VALID_BODY, message, SECRET, tolerance=300, now=NOW)
+    assert event.id == VALID["expect"]["event"]["id"]
+    with pytest.raises(WebhookVerificationError) as info:  # the public function, wall clock
+        verify_webhook(VALID_BODY, message, SECRET)
+    assert info.value.reason == "timestamp_too_old"
+
+
+def test_two_different_ids_in_an_http_message_are_missing_header() -> None:
+    pairs = [(name, value) for name, value in VALID["headers"]] + [("webhook-id", "another-id")]
+    with pytest.raises(WebhookVerificationError) as info:
+        _verify_at(VALID_BODY, http_message(pairs), SECRET, tolerance=300, now=NOW)
+    assert info.value.reason == "missing_header"
 
 
 def test_non_str_header_names_and_values_are_ignored() -> None:
