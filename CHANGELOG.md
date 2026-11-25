@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `verify_webhook` accepts header objects such as `http.client.HTTPMessage`
   and `BaseHTTPRequestHandler.headers` in its type, because the `headers`
   annotation now matches what the function always accepted at run time
+- The release workflow's post-publish checks now also run the README
+  spreadsheet example, its refusal branch and the webhook receiver
 
 ### Changed
 
